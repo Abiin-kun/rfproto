@@ -155,10 +155,9 @@ int native_video_push(native_video *v, const uint8_t *data, int size, char *erro
     return receive_frames(v, error, error_size);
 }
 
-int native_video_draw(native_video *v, void *renderer, float x, float y, float w, float h,
-                      char *error, size_t error_size) {
+static int upload_video(native_video *v, SDL_Renderer *renderer, char *error, size_t error_size) {
     if (!v->serial) return 1; /* Waiting is not a decoder/SDL failure. */
-    if (!renderer || w <= 0 || h <= 0) return fail(error, error_size, "invalid video destination");
+    if (!renderer) return fail(error, error_size, "invalid video destination");
     if (!v->texture || v->renderer != renderer || v->texture_width != v->width || v->texture_height != v->height) {
         SDL_DestroyTexture(v->texture);
         v->texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGBA32, SDL_TEXTUREACCESS_STREAMING,
@@ -176,11 +175,43 @@ int native_video_draw(native_video *v, void *renderer, float x, float y, float w
             return fail(error, error_size, SDL_GetError());
         v->uploaded = v->serial;
     }
+    return 0;
+}
+
+int native_video_draw(native_video *v, void *renderer, float x, float y, float w, float h,
+                      char *error, size_t error_size) {
+    if (!renderer || w <= 0 || h <= 0) return fail(error, error_size, "invalid video destination");
+    int result = upload_video(v, renderer, error, error_size);
+    if (result != 0) return result;
     float scale = w / v->width;
     if (h / v->height < scale) scale = h / v->height;
     SDL_FRect target = {x + (w - v->width * scale) / 2, y + (h - v->height * scale) / 2,
                         v->width * scale, v->height * scale};
     if (!SDL_RenderTexture(renderer, v->texture, NULL, &target))
+        return fail(error, error_size, SDL_GetError());
+    return 0;
+}
+
+int native_video_draw_rotated(native_video *v, void *renderer, float x, float y, float w, float h,
+                              int angle, char *error, size_t error_size) {
+    if (!renderer || w <= 0 || h <= 0) return fail(error, error_size, "invalid video destination");
+    angle %= 360;
+    if (angle < 0) angle += 360;
+    if (angle == 0) return native_video_draw(v, renderer, x, y, w, h, error, error_size);
+    if (angle != 90 && angle != 180 && angle != 270)
+        return fail(error, error_size, "video rotation must be a right angle");
+    int result = upload_video(v, renderer, error, error_size);
+    if (result != 0) return result;
+    float output_width = angle == 180 ? v->width : v->height;
+    float output_height = angle == 180 ? v->height : v->width;
+    float scale = w / output_width;
+    if (h / output_height < scale) scale = h / output_height;
+    /* SDL rotates the unrotated destination about its centre; the rotated
+       image's bounds are the swapped width/height used for the fit above. */
+    float draw_width = v->width * scale;
+    float draw_height = v->height * scale;
+    SDL_FRect target = {x + (w - draw_width) / 2, y + (h - draw_height) / 2, draw_width, draw_height};
+    if (!SDL_RenderTextureRotated(renderer, v->texture, NULL, &target, (double)angle, NULL, SDL_FLIP_NONE))
         return fail(error, error_size, SDL_GetError());
     return 0;
 }

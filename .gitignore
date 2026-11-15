@@ -24,6 +24,8 @@
 /artifacts/
 /logs/
 /.taste-skill/
+.claude/
+docs/
 *.log
 
 # Editor/OS noise

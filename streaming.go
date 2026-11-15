@@ -25,6 +25,10 @@ const (
 // for every launch, input event, and stop.
 var streams *viewerHub
 
+// frontendAssets is the read-only wallpaper/status observer installed by serve,
+// so the control API can expose wallpaper and phone status without a WebSocket.
+var frontendAssets *frontendObserver
+
 type rtcDescription struct {
 	Type string `json:"type"`
 	SDP  string `json:"sdp"`
@@ -42,6 +46,7 @@ type viewerCommand struct {
 	AppID       string          `json:"appId,omitempty"`
 	SessionID   string          `json:"sessionId,omitempty"`
 	MediaID     string          `json:"mediaId,omitempty"`
+	Orientation string          `json:"orientation,omitempty"`
 	Width       int             `json:"width,omitempty"`
 	Height      int             `json:"height,omitempty"`
 	Description *rtcDescription `json:"description,omitempty"`
@@ -69,17 +74,20 @@ func (a catalogApp) id() string {
 }
 
 type viewerSession struct {
-	ID        string `json:"id"`
-	Name      string `json:"name"`
-	Mode      string `json:"mode"`
-	State     string `json:"state"`
-	Width     int    `json:"width"`
-	Height    int    `json:"height"`
-	DisplayID int    `json:"displayId"`
-	Rotation  int    `json:"rotation"`
-	Touch     bool   `json:"touch"`
-	MediaID   string `json:"mediaId"`
-	Error     string `json:"error,omitempty"`
+	ID                 string `json:"id"`
+	Name               string `json:"name"`
+	Mode               string `json:"mode"`
+	State              string `json:"state"`
+	Width              int    `json:"width"`
+	Height             int    `json:"height"`
+	DisplayID          int    `json:"displayId"`
+	Rotation           int    `json:"rotation"`
+	Touch              bool   `json:"touch"`
+	MediaID            string `json:"mediaId"`
+	Error              string `json:"error,omitempty"`
+	Orientation        string `json:"orientation"`
+	OrientationPending string `json:"orientationPending,omitempty"`
+	OrientationError   string `json:"orientationError,omitempty"`
 }
 
 type viewerAudio struct {
@@ -99,13 +107,16 @@ type viewerState struct {
 
 type streamSession struct {
 	viewerSession
-	app      catalogApp
-	wireID   int64
-	deadline time.Time
-	launched bool
-	keys     map[int]bool
-	buttons  map[int]viewerInput
-	touches  map[int]viewerInput
+	app                         catalogApp
+	wireID                      int64
+	deadline                    time.Time
+	launched                    bool
+	keys                        map[int]bool
+	buttons                     map[int]viewerInput
+	touches                     map[int]viewerInput
+	launchWidth, launchHeight   int
+	naturalWidth, naturalHeight int
+	orientationDeadline         time.Time
 }
 
 type audioSession struct {
@@ -351,12 +362,67 @@ func (h *viewerHub) launchVideoLocked(s *streamSession) error {
 	return err
 }
 
+type streamResize struct {
+	streamLaunch
+	DisplayID int `json:"displayId"`
+}
+
+// requestOrientationLocked changes the phone's virtual display, not the local
+// picture. The producer acknowledges service-15 cmd 17 with cmd 26.
+func (h *viewerHub) requestOrientationLocked(cmd viewerCommand) (any, error) {
+	s := h.sessions[cmd.SessionID]
+	if s == nil || s.DisplayID < 0 || s.State != "connected" {
+		return nil, errors.New("phone display is not connected")
+	}
+	mode := strings.ToLower(cmd.Orientation)
+	if mode != "auto" && mode != "landscape" && mode != "portrait" {
+		return nil, errors.New("orientation must be auto, landscape, or portrait")
+	}
+	if s.OrientationPending != "" {
+		return nil, errors.New("the phone is still processing the previous orientation request")
+	}
+	w, height := s.naturalWidth, s.naturalHeight
+	if w <= 0 || height <= 0 {
+		w, height = s.Width, s.Height
+	}
+	switch mode {
+	case "landscape":
+		w, height = max(w, height), min(w, height)
+	case "portrait":
+		w, height = min(w, height), max(w, height)
+	}
+	// Display dimensions on the wire use the unrotated raster, as does input.
+	if mode != "auto" && s.Rotation%2 != 0 {
+		w, height = height, w
+	}
+	encodeW, encodeH := s.launchWidth, s.launchHeight
+	if encodeW <= 0 || encodeH <= 0 {
+		encodeW, encodeH = s.Width, s.Height
+	}
+	if err := h.releaseInputLocked(s); err != nil {
+		return nil, err
+	}
+	request := streamResize{streamLaunch: streamLaunch{
+		Pkg: s.app.Pkg, Cmp: s.app.Cmp, UserID: s.app.UserID, ShortcutID: s.app.ShortcutID,
+		InstanceID: h.instance, Source: 1, Width: encodeW, Height: encodeH,
+		DisplayWidth: w, DisplayHeight: height, DisplayScale: 1, DisplayDensity: 160,
+		SupportedMediaFormat: 1, SupportWebRTC: 1, SupportCustomDisplay: mode != "auto",
+	}, DisplayID: s.DisplayID}
+	if err := h.sendCommandLocked(svcAppStream, 17, request); err != nil {
+		return nil, err
+	}
+	s.OrientationPending, s.OrientationError = mode, ""
+	s.orientationDeadline = time.Now().Add(10 * time.Second)
+	h.publishLocked()
+	return map[string]string{"sessionId": s.ID, "orientation": mode, "status": "orientation requested"}, nil
+}
+
 func (h *viewerHub) newSessionLocked(mode string, app catalogApp, name string, width, height int) *streamSession {
 	h.nextSession++
 	s := &streamSession{viewerSession: viewerSession{
 		ID: "v" + strconv.FormatUint(h.nextSession, 10), Name: name, Mode: mode, State: "requesting",
-		Width: width, Height: height, DisplayID: -1,
-	}, app: app, deadline: time.Now().Add(45 * time.Second)}
+		Width: width, Height: height, DisplayID: -1, Orientation: "auto",
+	}, app: app, deadline: time.Now().Add(45 * time.Second), launchWidth: width, launchHeight: height}
 	h.sessions[s.ID] = s
 	h.order = append(h.order, s)
 	return s
@@ -410,6 +476,8 @@ func (h *viewerHub) command(cmd viewerCommand) (any, error) {
 		}
 		h.publishLocked()
 		return map[string]string{"sessionId": s.ID}, nil
+	case "orientation":
+		return h.requestOrientationLocked(cmd)
 	case "stop":
 		if s := h.sessions[cmd.SessionID]; s != nil {
 			h.removeSessionLocked(s, true)
@@ -453,7 +521,8 @@ type streamPhoneData struct {
 	ProtocolData string `json:"protocolData"`
 	Type         string `json:"type"`
 	Data         string `json:"data"`
-	Rotation     int    `json:"rotation"`
+	Rotation     *int   `json:"rotation"`
+	Success      *bool  `json:"success"`
 	AppName      string `json:"appName"`
 }
 
@@ -606,6 +675,7 @@ func (h *viewerHub) inbound(control *liveSession, service int, msg []byte) {
 			return
 		}
 		if data.WebRTCData == "" && s.wireID == data.SessionID && s.MediaID != "" {
+			_ = h.releaseInputLocked(s)
 			if data.Width > 0 {
 				s.Width = data.Width
 			}
@@ -614,6 +684,12 @@ func (h *viewerHub) inbound(control *liveSession, service int, msg []byte) {
 			}
 			if data.DisplayID != nil {
 				s.DisplayID = *data.DisplayID
+			}
+			if err := h.sendCommandLocked(svcAppStream, 4, struct {
+				SessionID int64 `json:"sessionId"`
+				Resize    int   `json:"resize"`
+			}{s.wireID, 1}); err != nil {
+				h.errorLocked(err)
 			}
 			h.publishLocked()
 			return
@@ -637,6 +713,9 @@ func (h *viewerHub) inbound(control *liveSession, service int, msg []byte) {
 		}
 		h.nextMedia++
 		s.MediaID = s.ID + ":" + strconv.FormatUint(h.nextMedia, 10)
+		if s.naturalWidth == 0 && s.Width > 0 && s.Height > 0 {
+			s.naturalWidth, s.naturalHeight = s.Width, s.Height
+		}
 		s.deadline = time.Now().Add(45 * time.Second)
 		h.publishLocked()
 		h.emitLocked(map[string]any{"type": "offer", "mediaId": s.MediaID, "kind": "video", "sessionId": s.ID, "description": offer})
@@ -707,14 +786,33 @@ func (h *viewerHub) inbound(control *liveSession, service int, msg []byte) {
 			h.emitLocked(map[string]any{"type": "focus", "sessionId": target.ID})
 		}
 	case 16:
-		if s == nil || data.Rotation < 0 || data.Rotation > 3 {
+		if s == nil && data.SessionID == 0 {
+			s = h.displayLocked(data.DisplayID)
+		}
+		if s == nil || data.Rotation == nil || *data.Rotation < 0 || *data.Rotation > 3 {
 			return
 		}
 		_ = h.releaseInputLocked(s)
-		if s.Rotation%2 != data.Rotation%2 {
-			s.Width, s.Height = s.Height, s.Width
+		// Video and input stay in the encoder's natural raster coordinates.
+		// Rotation metadata describes how the receiver presents that raster.
+		s.Rotation = *data.Rotation
+		h.publishLocked()
+	case 26:
+		s = h.displayLocked(data.DisplayID)
+		if s == nil || s.OrientationPending == "" || data.Success == nil {
+			return
 		}
-		s.Rotation = data.Rotation
+		if *data.Success {
+			s.Orientation = s.OrientationPending
+			s.OrientationError = ""
+		} else {
+			s.OrientationError = "phone rejected the display orientation resize"
+			if data.Error != 0 {
+				s.OrientationError += fmt.Sprintf(" (code %d)", data.Error)
+			}
+		}
+		s.OrientationPending = ""
+		s.orientationDeadline = time.Time{}
 		h.publishLocked()
 	case 23:
 		if s == nil {
@@ -1082,6 +1180,12 @@ func (h *viewerHub) maintain() {
 			for _, s := range h.order {
 				if !s.deadline.IsZero() && !now.Before(s.deadline) {
 					h.failLocked(s, "phone did not finish starting this display within 45 seconds; check phone consent", true)
+				}
+				if s.OrientationPending != "" && !now.Before(s.orientationDeadline) {
+					s.OrientationPending = ""
+					s.orientationDeadline = time.Time{}
+					s.OrientationError = "phone did not acknowledge the orientation request"
+					h.publishLocked()
 				}
 			}
 			if h.audio != nil && !h.audio.deadline.IsZero() && !now.Before(h.audio.deadline) {

@@ -1,0 +1,21 @@
+rfproto SDL frontend / control API / TUI — status
+
+DONE since checkpoint:
+- Frontend native_ui.go builds + renders (added missing runtime.LockOSThread() — fixed intermittent all-text-black-boxes).
+- control.go: loopback HTTP API (state/apps/launch/desktop/stop/orientation/focus/mute/wallpaper); scriptable ctl client (-json/-addr); frontendAssets + setControlFrontend bridges; hub+observer created when -ui OR -ctl set (headless works, verified live).
+- main.go: -ctl flag, ctl + tui dispatch.
+- tui.go v1: alt-screen TUI, verified in a PTY.
+- golang.org/x/term@v0.29.0 added.
+- Orientation FIX (this turn): Auto now follows the phone / decoded frame (angle 0), ignores session.Rotation. The phone rotates its own content (streaming.go case 16 swaps width/height), so Auto must not rotate or input lands perpendicular. Forced Landscape/Portrait keep local view-rotate with inverted input. syncSession now resizes on dim/rotation change in all modes + leak-free title.
+  - edited: native_ui.go (streamShape, syncSession), native_ui_test.go (Auto case), docs/06-frontend.md (§4.1).
+
+TESTS — control_test.go (12) + frontend_assets_test.go (7) ADDED by subagent B; pass incl. -race (verified before my orientation edit).
+
+DOCS — docs/06-frontend.md CREATED (336 lines) + README updated by subagent C.
+  - NOTE: .gitignore line 28 ignores docs/; docs/06-frontend.md must be force-added (git add -f) at commit to match how 00-05 were tracked.
+
+REMAINING:
+- [ ] Wait for subagent A (tui.go two-column + wallpaper thumb).
+- [ ] After A: full `go build ./...` + `go test -race .` with orientation fix + A's tui + B's tests combined.
+- [ ] Remove demo_tmp_test.go (temp harness).
+- [ ] Commit (force-add web/InterVariable.ttf + license + docs/06-frontend.md; frontend; control/TUI; docs).

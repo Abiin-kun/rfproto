@@ -2,30 +2,47 @@ package main
 
 import "testing"
 
-func TestNativePointerCoordinates(t *testing.T) {
+func TestStreamShapeUsesPhoneRotation(t *testing.T) {
 	cases := []struct {
-		name   string
-		x, y   float32
-		clamp  bool
-		px, py int
-		ok     bool
+		name                string
+		session             viewerSession
+		frameW, frameH      int
+		wantW, wantH, wantA int
 	}{
-		{"center", 420, 230, false, 640, 360, true},
-		{"top left", 100, 50, false, 0, 0, true},
-		{"letterbox", 99, 230, false, 0, 0, false},
-		{"bottom edge", 420, 410, false, 0, 0, false},
-		{"captured drag", 0, 1000, true, 0, 719, true},
+		{"portrait raster", viewerSession{Width: 360, Height: 800}, 0, 0, 360, 800, 0},
+		{"landscape raster", viewerSession{Width: 1280, Height: 720}, 0, 0, 1280, 720, 0},
+		{"phone quarter turn is counterclockwise", viewerSession{Width: 360, Height: 800, Rotation: 1}, 360, 800, 800, 360, 270},
+		{"phone half turn", viewerSession{Width: 360, Height: 800, Rotation: 2}, 360, 800, 360, 800, 180},
+		{"phone reverse quarter turn", viewerSession{Width: 360, Height: 800, Rotation: 3}, 360, 800, 800, 360, 90},
+		{"auto follows landscape buffer rotation", viewerSession{Width: 1280, Height: 720, Rotation: 1}, 1280, 720, 720, 1280, 270},
+		{"pending remote resize does not rotate old pixels", viewerSession{Orientation: "auto", OrientationPending: "landscape"}, 360, 800, 360, 800, 0},
+		{"confirmed remote resize does not add local rotation", viewerSession{Orientation: "landscape"}, 800, 360, 800, 360, 0},
+		{"decoded dimensions take precedence", viewerSession{Width: 360, Height: 800}, 800, 360, 800, 360, 0},
+		{"fallback size", viewerSession{}, 0, 0, 1280, 720, 0},
 	}
-	for _, density := range []float32{1, 2} {
-		for _, rotation := range []int{0, 1} {
-			u := nativeWorkspace{active: "v1", density: density, display: nativeRect{100, 50, 640, 360},
-				state: viewerState{Connected: true, Sessions: []viewerSession{{ID: "v1", State: "connected", DisplayID: 2, Width: 1280, Height: 720, Rotation: rotation}}}}
-			for _, tc := range cases {
-				x, y, ok := u.point(tc.x, tc.y, tc.clamp)
-				if x != tc.px || y != tc.py || ok != tc.ok {
-					t.Errorf("%s density=%v rotation=%d: got (%d,%d,%v), want (%d,%d,%v)", tc.name, density, rotation, x, y, ok, tc.px, tc.py, tc.ok)
-				}
-			}
+	for _, tc := range cases {
+		w, h, angle := streamShape(tc.session, tc.frameW, tc.frameH)
+		if w != tc.wantW || h != tc.wantH || angle != tc.wantA {
+			t.Errorf("%s: got (%d,%d,%d), want (%d,%d,%d)", tc.name, w, h, angle, tc.wantW, tc.wantH, tc.wantA)
+		}
+	}
+}
+
+func TestRotatePointInverseMapping(t *testing.T) {
+	cases := []struct {
+		angle        int
+		u, v         float64
+		wantU, wantV float64
+	}{
+		{0, 0.25, 0.10, 0.25, 0.10},
+		{90, 0.25, 0.10, 0.10, 0.75},
+		{180, 0.25, 0.10, 0.75, 0.90},
+		{270, 0.25, 0.10, 0.90, 0.25},
+	}
+	for _, tc := range cases {
+		u, v := rotatePoint(tc.u, tc.v, tc.angle)
+		if u != tc.wantU || v != tc.wantV {
+			t.Errorf("angle %d: got (%.2f,%.2f), want (%.2f,%.2f)", tc.angle, u, v, tc.wantU, tc.wantV)
 		}
 	}
 }
@@ -61,29 +78,79 @@ func TestNativeKeyboardTextAndShortcutSymmetry(t *testing.T) {
 	}
 }
 
-func TestNativeFocusLossReleasesLocalInput(t *testing.T) {
-	// Remote held-input cleanup is separately exercised in streaming tests.
-	u := nativeWorkspace{focus: "display", composition: "composing", keys: map[int]int{4: 29},
-		buttons: map[int]bool{1: true}, touches: map[nativeTouchKey]nativeTouch{{device: 1, finger: 2}: {id: 0, x: 20, y: 30}}}
-	u.loseFocus()
-	if u.focus != "" || u.composition != "" || len(u.keys) != 0 || len(u.buttons) != 0 || len(u.touches) != 0 {
-		t.Fatalf("focus loss retained input: focus=%q composition=%q keys=%v buttons=%v touches=%v", u.focus, u.composition, u.keys, u.buttons, u.touches)
+func TestLauncherFilterAndSelection(t *testing.T) {
+	front := &frontend{state: viewerState{Apps: []viewerApp{
+		{ID: "clock", Name: "Clock", Package: "com.example.clock"},
+		{ID: "maps", Name: "Maps", Package: "com.example.maps"},
+		{ID: "photos", Name: "Photos", Package: "com.example.photos"},
+	}}}
+	l := nativeLauncher{front: front, selected: 1}
+	l.filter()
+	if len(l.apps) != 3 || l.selected != 0 {
+		t.Fatalf("initial filter: apps=%d selected=%d", len(l.apps), l.selected)
 	}
-	if _, ok := nativeKeyboardInput(4, 0, 'a', false, false, u.keys); ok {
-		t.Fatal("focus loss left an unmatched remote key-up")
+	l.search = "map"
+	l.filter()
+	if len(l.apps) != 1 || l.apps[0].ID != "maps" || l.selected != 0 {
+		t.Fatalf("search filter: %+v selected=%d", l.apps, l.selected)
+	}
+	l.search = "nothing"
+	l.filter()
+	if len(l.apps) != 0 || l.selected != -1 {
+		t.Fatalf("empty filter: apps=%d selected=%d", len(l.apps), l.selected)
 	}
 }
 
-func TestNativeRemoteCloseForgetsHeldInput(t *testing.T) {
-	h, _, _, _ := streamingFixture(t)
-	s := h.newSessionLocked("app", catalogApp{Pkg: "example.clock"}, "Clock", 1280, 720)
-	s.State, s.DisplayID, s.wireID = "connected", 3, 42
-	u := nativeWorkspace{hub: h, state: h.state(), active: s.ID, focus: "display",
-		keys: map[int]int{4: 29}, buttons: map[int]bool{1: true},
-		touches: map[nativeTouchKey]nativeTouch{{device: 1, finger: 2}: {id: 0}}}
-	h.removeSessionLocked(s, false)
-	u.handleHub(map[string]any{"type": "state", "state": h.state()})
-	if u.errorText != "" || u.active != "" || len(u.keys) != 0 || len(u.buttons) != 0 || len(u.touches) != 0 {
-		t.Fatalf("remote close retained input or reported a stale-session error: %+v", u)
+func TestMonogramAndTintAreStable(t *testing.T) {
+	if got := monogram("Google Maps"); got != "GM" {
+		t.Fatalf("monogram: %q", got)
+	}
+	if got := monogram("  "); got == "" {
+		t.Fatal("empty monogram")
+	}
+	if appTint("com.example.clock") != appTint("com.example.clock") {
+		t.Fatal("identity tint is not deterministic")
+	}
+	if appTint("com.example.clock") == appTint("com.example.maps") {
+		t.Fatal("identity tints collide for different packages")
+	}
+}
+
+func TestLauncherWheelScrollSurvivesLayout(t *testing.T) {
+	front := &frontend{state: viewerState{Connected: true, Apps: make([]viewerApp, 80)}}
+	l := nativeLauncher{front: front}
+	l.width, l.height = 1000, 600
+	l.filter()
+	l.layout()
+	x, y := l.grid.center()
+	l.wheel(x, y, -2)
+	scrolled := l.scroll
+	l.layout()
+	if scrolled <= 0 || l.scroll != scrolled {
+		t.Fatalf("wheel scroll snapped back: before=%v after=%v", scrolled, l.scroll)
+	}
+	l.moveSelection(1)
+	if l.scroll != 0 {
+		t.Fatalf("keyboard selection did not return into view: %v", l.scroll)
+	}
+}
+
+func TestStreamPointerFollowsPhoneRotationAndLetterboxing(t *testing.T) {
+	s := nativeStream{
+		front:   &frontend{state: viewerState{Connected: true}},
+		session: viewerSession{State: "connected", DisplayID: 3, Width: 360, Height: 800, Rotation: 1},
+		video:   nativeRect{100, 50, 200, 100},
+	}
+	_, _, s.angle = streamShape(s.session, 360, 800)
+	x, y, ok := s.point(150, 62.5, false)
+	if !ok || x != 315 || y != 200 {
+		t.Fatalf("rotated pointer = (%d,%d,%v), want (315,200,true)", x, y, ok)
+	}
+	if _, _, ok := s.point(99, 60, false); ok {
+		t.Fatal("letterbox press reached the phone")
+	}
+	x, y, ok = s.point(400, 200, true)
+	if !ok || x != 0 || y != 799 {
+		t.Fatalf("captured edge release = (%d,%d,%v), want (0,799,true)", x, y, ok)
 	}
 }

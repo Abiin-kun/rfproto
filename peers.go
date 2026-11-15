@@ -187,10 +187,15 @@ func (s *peerStore) save(peers map[string]pairedPhone) error {
 
 func peersCommand(args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("peers", flag.ContinueOnError)
-	dir := fs.String("dir", "state", "state directory")
+	dir := fs.String("dir", "", "state dir (default: $XDG_STATE_HOME/rfproto or ~/.local/state/rfproto)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	resolvedDir, err := resolveStateDir(*dir)
+	if err != nil {
+		return err
+	}
+	*dir = resolvedDir
 	if fs.NArg() == 1 && fs.Arg(0) == "list" {
 		peers, err := readPeers(*dir)
 		if err != nil {
@@ -216,7 +221,7 @@ func peersCommand(args []string, out io.Writer) error {
 		defer s.close()
 		return s.forget(fs.Arg(1))
 	}
-	return errors.New("usage: rfproto peers [-dir state] list | forget <realDeviceId>")
+	return errors.New("usage: rfproto peers [-dir PATH] list | forget <realDeviceId>")
 }
 
 // authHello is the documented manager hello, not a generic service message.

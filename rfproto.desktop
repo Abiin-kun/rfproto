@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=rfproto
+Comment=Ready For / Smart Connect for Linux
+Exec=rfproto
+Icon=rfproto
+Terminal=false
+Categories=Network;
+Keywords=phone;Android;Smart Connect;Ready For;
+StartupNotify=false

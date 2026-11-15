@@ -148,20 +148,23 @@ func TestStreamingViewerCloseReleasesInputAndRemoteResources(t *testing.T) {
 	}
 }
 
-func TestStreamingRotationKeepsPointerCoordinatesInDisplaySpace(t *testing.T) {
+func TestStreamingRotationKeepsPointerCoordinatesInEncoderSpace(t *testing.T) {
 	h, control, sent, _ := streamingFixture(t)
 	s := h.newSessionLocked("app", catalogApp{Pkg: "example.clock"}, "Clock", 1280, 720)
 	s.State, s.DisplayID, s.wireID, s.MediaID = "connected", 3, 42, "clock-video"
-	receiveStream(t, h, control, svcAppStream, 16, map[string]any{"sessionId": 42, "displayId": 3, "rotation": 1})
-	input := viewerInput{Type: "move", X: 700, Y: 1200}
+	receiveStream(t, h, control, svcAppStream, 16, map[string]any{"displayId": 3, "rotation": 1})
+	if s.Rotation != 1 || s.Width != 1280 || s.Height != 720 {
+		t.Fatalf("rotation metadata changed the encoder/input raster: %+v", s.viewerSession)
+	}
+	input := viewerInput{Type: "move", X: 1200, Y: 700}
 	if _, err := h.command(viewerCommand{Op: "input", SessionID: s.ID, Input: &input}); err != nil {
-		t.Fatalf("rotated portrait pointer rejected: %v", err)
+		t.Fatalf("natural-raster pointer rejected: %v", err)
 	}
 	var wire streamInputData
 	if err := json.Unmarshal((*sent)[len(*sent)-1].Data.Data, &wire); err != nil {
 		t.Fatal(err)
 	}
-	if wire.X != 700 || wire.Y != 1200 || wire.DisplayID != 3 {
+	if wire.X != 1200 || wire.Y != 700 || wire.DisplayID != 3 {
 		t.Fatalf("pointer was transformed twice: %+v", wire)
 	}
 }
@@ -306,5 +309,96 @@ func TestPhoneAudioRejectsMicrophoneWithoutStoppingOutput(t *testing.T) {
 	receiveStream(t, h, control, svcPhoneAudio, 4, map[string]any{"sessionId": a.wireID + 1, "state": 0})
 	if h.audio != a || a.State != "connected" || a.wireID != 123456789 {
 		t.Fatalf("microphone or stale session messages interrupted phone output: %+v", h.audio)
+	}
+}
+
+func TestStreamingOrientationRequestsPhoneResizeAndWaitsForAck(t *testing.T) {
+	h, control, sent, _ := streamingFixture(t)
+	s := h.newSessionLocked("app", catalogApp{Pkg: "example.clock", Cmp: "example.Clock"}, "Clock", 1280, 720)
+	s.Width, s.Height = 360, 800
+	s.naturalWidth, s.naturalHeight = 360, 800
+	s.State, s.DisplayID, s.wireID, s.MediaID = "connected", 3, 42, "clock-video"
+	for _, tc := range []struct {
+		mode      string
+		w, height int
+		custom    bool
+	}{{"landscape", 800, 360, true}, {"portrait", 360, 800, true}, {"auto", 360, 800, false}} {
+		before := s.Orientation
+		if _, err := h.command(viewerCommand{Op: "orientation", SessionID: s.ID, Orientation: tc.mode}); err != nil {
+			t.Fatal(err)
+		}
+		last := (*sent)[len(*sent)-1]
+		var request streamResize
+		if err := json.Unmarshal(last.Data.Data, &request); err != nil {
+			t.Fatal(err)
+		}
+		if last.ServiceID != svcAppStream || last.Data.Cmd != 17 ||
+			request.DisplayID != 3 || request.Pkg != "example.clock" || request.Cmp != "example.Clock" ||
+			request.DisplayWidth != tc.w || request.DisplayHeight != tc.height || request.SupportCustomDisplay != tc.custom {
+			t.Fatalf("wrong phone resize for %s: %+v, cmd=%d", tc.mode, request, last.Data.Cmd)
+		}
+		if s.Orientation != before || s.OrientationPending != tc.mode || s.Width != 360 || s.Height != 800 {
+			t.Fatalf("orientation applied before phone response: %+v", s.viewerSession)
+		}
+		if _, err := h.command(viewerCommand{Op: "orientation", SessionID: s.ID, Orientation: "auto"}); err == nil {
+			t.Fatal("overlapping uncorrelated display resize was sent")
+		}
+		receiveStream(t, h, control, svcAppStream, 26, map[string]any{"displayId": 3, "success": true, "error": 0})
+		if s.Orientation != tc.mode || s.OrientationPending != "" || s.MediaID != "clock-video" {
+			t.Fatalf("ack did not confirm mode without tearing down video: %+v", s.viewerSession)
+		}
+	}
+}
+
+func TestStreamingOrientationFailureKeepsWorkingVideo(t *testing.T) {
+	h, control, _, _ := streamingFixture(t)
+	s := h.newSessionLocked("app", catalogApp{Pkg: "example.clock"}, "Clock", 1280, 720)
+	s.State, s.DisplayID, s.wireID, s.MediaID = "connected", 3, 42, "clock-video"
+	if _, err := h.command(viewerCommand{Op: "orientation", SessionID: s.ID, Orientation: "portrait"}); err != nil {
+		t.Fatal(err)
+	}
+	receiveStream(t, h, control, svcAppStream, 26, map[string]any{"displayId": 99, "success": true})
+	if s.OrientationPending != "portrait" {
+		t.Fatal("another display's reply confirmed this resize")
+	}
+	receiveStream(t, h, control, svcAppStream, 26, map[string]any{"displayId": 3, "success": false, "error": 1})
+	if s.Orientation != "auto" || s.OrientationPending != "" || !strings.Contains(s.OrientationError, "code 1") ||
+		s.State != "connected" || s.MediaID != "clock-video" {
+		t.Fatalf("phone refusal lost or stopped working stream: %+v", s.viewerSession)
+	}
+}
+
+func TestStreamingOrientationCompensatesRotationAndAcknowledgesNewRaster(t *testing.T) {
+	h, control, sent, _ := streamingFixture(t)
+	s := h.newSessionLocked("app", catalogApp{Pkg: "example.clock"}, "Clock", 1280, 720)
+	s.State, s.DisplayID, s.wireID, s.MediaID = "connected", 3, 42, "clock-video"
+	s.Width, s.Height, s.Rotation = 360, 800, 1
+	if _, err := h.command(viewerCommand{Op: "orientation", SessionID: s.ID, Orientation: "portrait"}); err != nil {
+		t.Fatal(err)
+	}
+	var request streamResize
+	if err := json.Unmarshal((*sent)[len(*sent)-1].Data.Data, &request); err != nil {
+		t.Fatal(err)
+	}
+	if request.DisplayWidth != 800 || request.DisplayHeight != 360 {
+		t.Fatalf("portrait view requested wrong raster for rotation=1: %+v", request)
+	}
+	receiveStream(t, h, control, svcAppStream, 3, map[string]any{
+		"sessionId": 42, "displayId": 3, "width": 800, "height": 360,
+	})
+	last := (*sent)[len(*sent)-1]
+	var ack struct {
+		SessionID int64 `json:"sessionId"`
+		Resize    int   `json:"resize"`
+	}
+	if err := json.Unmarshal(last.Data.Data, &ack); err != nil {
+		t.Fatal(err)
+	}
+	if last.Data.Cmd != 4 || ack.SessionID != 42 || ack.Resize != 1 || s.MediaID != "clock-video" {
+		t.Fatalf("resize parameters were not acknowledged on the existing transport: %+v, %+v", last, s.viewerSession)
+	}
+	w, height, angle := streamShape(s.viewerSession, 800, 360)
+	if w != 360 || height != 800 || angle != 270 {
+		t.Fatalf("phone's new portrait raster displayed incorrectly: %dx%d @%d", w, height, angle)
 	}
 }

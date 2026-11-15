@@ -70,10 +70,12 @@ func main() {
 	runtime.LockOSThread()
 	log.SetFlags(log.Ltime | log.Lmicroseconds)
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: rfproto serve [flags] | rfproto peers [-dir state] {list|forget ID} | rfproto browse [-service X] [secs] | rfproto ble {scan|adv} [flags]")
-		os.Exit(2)
+		serve([]string{"-ble"})
+		return
 	}
 	switch os.Args[1] {
+	case "-h", "--help", "help":
+		fmt.Fprintln(os.Stdout, "usage: rfproto (GUI + BLE) | rfproto serve [flags] | rfproto ctl [flags] [command] | rfproto tui | rfproto peers [-dir PATH] {list|forget ID} | rfproto browse [secs] | rfproto ble {scan|adv} [flags]")
 	case "serve":
 		serve(os.Args[2:])
 	case "peers":
@@ -84,6 +86,14 @@ func main() {
 		browse(os.Args[2:])
 	case "ble":
 		bleCmd(os.Args[2:])
+	case "ctl":
+		if err := ctlCommand(os.Args[2:], os.Stdout, os.Stderr); err != nil {
+			log.Fatal(err)
+		}
+	case "tui":
+		if err := ctlCommand(os.Args[2:], os.Stdout, os.Stderr); err != nil {
+			log.Fatal(err)
+		}
 	default:
 		log.Fatalf("unknown command %q", os.Args[1])
 	}
@@ -154,7 +164,7 @@ func bleCmd(args []string) {
 	case "adv":
 		host, _ := os.Hostname()
 		fs := flag.NewFlagSet("ble adv", flag.ExitOnError)
-		dir := fs.String("dir", "state", "state dir (used for the persisted device id)")
+		dir := fs.String("dir", "", "state dir (default: $XDG_STATE_HOME/rfproto or ~/.local/state/rfproto)")
 		id := fs.String("id", "", "deviceId override (base64)")
 		name := fs.String("name", host, "deviceName / LocalName")
 		capv := fs.Int("cap", pcCapability&0xff, "byte 1 of the payload (low byte of the PC cap 0x28ba)")
@@ -164,6 +174,14 @@ func bleCmd(args []string) {
 		localName := fs.Bool("localname", true, "include LocalName in the advertisement")
 		fs.Parse(args[1:])
 
+		resolvedDir, err := resolveStateDir(*dir)
+		if err != nil {
+			log.Fatal(err)
+		}
+		*dir = resolvedDir
+		if err := os.MkdirAll(*dir, 0o700); err != nil {
+			log.Fatal(err)
+		}
 		devID := deviceID(*dir, *id)
 		var payload []byte
 		if *hexPayload != "" {
@@ -201,7 +219,7 @@ func bleCmd(args []string) {
 func serve(args []string) {
 	host, _ := os.Hostname()
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
-	dir := fs.String("dir", "state", "state dir (cert, key, device id, trusted phones)")
+	dir := fs.String("dir", "", "state dir (default: $XDG_STATE_HOME/rfproto or ~/.local/state/rfproto)")
 	port := fs.Int("port", 19527, "TLS/WebSocket listen port (advertised as the service port AND the QR wsPort)")
 	probe := fs.Int("probe", 19527, "plain TCP reachability port; separate listener only if != -port")
 	service := fs.String("service", defaultService, "mDNS service type to advertise")
@@ -216,7 +234,7 @@ func serve(args []string) {
 	capv := fs.Int("cap", pcCapability, "mDNS cap = device.Device+0x58 (the PC's default is 0x28ba=10426); also used in the WS reply and as the BLE advert byte")
 	appType := fs.Int("apptype", 0, "mDNS appType (placeholder)")
 	useRSA := fs.Bool("rsa", false, "RSA-2048 cert instead of ECDSA P-256 (only used when generating)")
-	qrPath := fs.String("qr", "qr.png", "write pairing QR PNG here (empty = no PNG)")
+	qrPath := fs.String("qr", "", "write pairing QR PNG (default: state dir/pairing.png; explicit empty disables)")
 	noQR := fs.Bool("noqr", false, "skip QR generation entirely")
 	wfd := fs.String("wfd", "", "WiFi-Direct (wfd) name for QR policies (default: deviceName)")
 	token := fs.String("token", "", "QR token override (default: random per run)")
@@ -261,15 +279,43 @@ func serve(args []string) {
 	castRegFlag := fs.Bool("castregister", true, "with -cast, send the cmd-1000 listener registration before the cast request")
 	appIconsFlag := fs.Bool("appicons", false, "PROBE: on the phone's service-17 app list, fetch its advertised HTTPS service (port+token+cert fingerprint) and try the icon paths (appicons.go)")
 	appIconHost := fs.String("appiconhost", "", "with -appicons, override the host (default: the phone's ws peer address)")
-	appIconOut := fs.String("appiconout", "appicons", "with -appicons, output dir for the report and any bodies")
+	appIconOut := fs.String("appiconout", "", "with -appicons, output dir (default: state dir/appicons)")
 	appIconMax := fs.Int("appiconmax", 3, "with -appicons, how many app icons to try")
 	injectAddr := fs.String("inject", "", "loopback address for a live control socket, e.g. 127.0.0.1:19528 (POST /send with a raw frame body, GET /state)")
+	ctlAddr := fs.String("ctl", "", "control API address (default: private state-directory UNIX socket; host:port or unix:/absolute/path; empty disables)")
 	uiEnabled := fs.Bool("ui", true, "open the native SDL phone workspace (false for headless serving)")
 	var ipList multiFlag
 	fs.Var(&ipList, "ip", "LAN IP to advertise in QR ips/wifi (repeatable; default: auto-detect all non-loopback)")
 	var sets multiFlag
 	fs.Var(&sets, "set", "override/add TXT entry, e.g. -set type=2 (repeatable)")
 	fs.Parse(args)
+	resolvedDir, err := resolveStateDir(*dir)
+	if err != nil {
+		log.Fatal(err)
+	}
+	*dir = resolvedDir
+	qrExplicit := false
+	ctlExplicit := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "qr" {
+			qrExplicit = true
+		}
+		if f.Name == "ctl" {
+			ctlExplicit = true
+		}
+	})
+	if !ctlExplicit {
+		*ctlAddr, err = defaultControlAddr(*dir)
+		if err != nil {
+			log.Fatal(err)
+		}
+	}
+	if !qrExplicit {
+		*qrPath = filepath.Join(*dir, "pairing.png")
+	}
+	if *appIconOut == "" {
+		*appIconOut = filepath.Join(*dir, "appicons")
+	}
 
 	captureDir = *capDir
 	if captureDir != "" {
@@ -327,19 +373,6 @@ func serve(args []string) {
 	if appIconsOn {
 		log.Printf("[appicons] enabled: host=%q out=%s max=%d", appIconsHost, appIconsOut, appIconsMax)
 	}
-	startInjectServer(*injectAddr)
-	if *uiEnabled {
-		streams = newViewerHub()
-		defer streams.close()
-	}
-	if probeStatusReply || probeViewOnline || probeFSReply != "" || len(probeEchoSvcs) > 0 {
-		log.Printf("[probe] liveness probes: statusreply=%v viewonline=%v echosvc=%v fsreply=%q(svc=%d cmd=%d)",
-			probeStatusReply, probeViewOnline, *echoSvcs, probeFSReply, probeFSSvc, probeFSCmd)
-	}
-	// -cap is device.Device+0x58: one source of truth for the mDNS TXT entry,
-	// the WS discovery reply and (low byte) the BLE advert.
-	deviceCapability = *capv
-
 	if err := os.MkdirAll(*dir, 0o700); err != nil {
 		log.Fatal(err)
 	}
@@ -349,6 +382,29 @@ func serve(args []string) {
 	}
 	defer store.close()
 	trustedAdults = store
+	startInjectServer(*injectAddr)
+	var assets *frontendObserver
+	if *uiEnabled || *ctlAddr != "" {
+		streams = newViewerHub()
+		defer streams.close()
+		assets = newFrontendObserver(*dir)
+		frontendAssets = assets
+		frontendObserverHook = assets.Observe
+		defer func() { frontendObserverHook = nil; frontendAssets = nil }()
+	}
+	control, err := startControlServer(*ctlAddr, store)
+	if err != nil {
+		log.Fatalf("[ctl] %v", err)
+	}
+	defer control.Close()
+	if probeStatusReply || probeViewOnline || probeFSReply != "" || len(probeEchoSvcs) > 0 {
+		log.Printf("[probe] liveness probes: statusreply=%v viewonline=%v echosvc=%v fsreply=%q(svc=%d cmd=%d)",
+			probeStatusReply, probeViewOnline, *echoSvcs, probeFSReply, probeFSSvc, probeFSCmd)
+	}
+	// -cap is device.Device+0x58: one source of truth for the mDNS TXT entry,
+	// the WS discovery reply and (low byte) the BLE advert.
+	deviceCapability = *capv
+
 	cert, err := loadOrCreateCert(*dir, *useRSA, host)
 	if err != nil {
 		log.Fatal(err)
@@ -499,6 +555,9 @@ func serve(args []string) {
 		} else {
 			log.Printf("[qr] token=%s", tok)
 			renderQR(payload, *qrPath)
+			if assets != nil {
+				assets.setPairingQR(payload)
+			}
 			log.Printf("[qr] scan this with the Ready For app; it should connect to :%d", *port)
 		}
 	}
@@ -540,7 +599,7 @@ func serve(args []string) {
 	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
 	defer signal.Stop(sig)
 	if *uiEnabled {
-		if err := runNativeViewer(streams, sig); err != nil {
+		if err := runNativeViewer(streams, assets, sig); err != nil {
 			log.Fatalf("[ui] %v", err)
 		}
 	} else {
@@ -876,6 +935,7 @@ func handle(w http.ResponseWriter, r *http.Request) {
 			setLive(ls)
 			registered = true
 		}
+		observeFrontendFrame(serviceID, msg)
 		if streams != nil {
 			streams.inbound(ls, serviceID, msg)
 		}

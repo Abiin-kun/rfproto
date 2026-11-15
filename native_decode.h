@@ -11,6 +11,7 @@ typedef struct native_audio native_audio;
 native_video *native_video_new(int codec, char *error, size_t error_size);
 int native_video_push(native_video *video, const uint8_t *data, int size, char *error, size_t error_size);
 int native_video_draw(native_video *video, void *renderer, float x, float y, float w, float h, char *error, size_t error_size);
+int native_video_draw_rotated(native_video *video, void *renderer, float x, float y, float w, float h, int angle, char *error, size_t error_size);
 void native_video_free(native_video *video);
 uint64_t native_video_inspect(native_video *video, int *width, int *height, int *pitch, uint8_t *rgba);
 native_audio *native_audio_new(char *error, size_t error_size);

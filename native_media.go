@@ -187,6 +187,16 @@ func (m *nativeMedia) SetMuted(muted bool) {
 
 // Draw reports readiness honestly: nil means a decoded frame was rendered.
 func (m *nativeMedia) Draw(mediaID string, renderer unsafe.Pointer, x, y, w, h float32) error {
+	return m.draw(mediaID, renderer, x, y, w, h, 0)
+}
+
+// DrawRotated renders a decoded frame at a right angle without touching the
+// decoder's output or the phone's declared orientation.
+func (m *nativeMedia) DrawRotated(mediaID string, renderer unsafe.Pointer, x, y, w, h float32, angle int) error {
+	return m.draw(mediaID, renderer, x, y, w, h, angle)
+}
+
+func (m *nativeMedia) draw(mediaID string, renderer unsafe.Pointer, x, y, w, h float32, angle int) error {
 	peer := m.peers[mediaID]
 	if peer == nil {
 		return errNativeWaitingTransport
@@ -199,8 +209,8 @@ func (m *nativeMedia) Draw(mediaID string, renderer unsafe.Pointer, x, y, w, h f
 	if peer.video == nil {
 		return errNativeWaitingTrack
 	}
-	result := C.native_video_draw(peer.video, renderer, C.float(x), C.float(y), C.float(w), C.float(h),
-		&peer.drawError[0], C.size_t(len(peer.drawError)))
+	result := C.native_video_draw_rotated(peer.video, renderer, C.float(x), C.float(y), C.float(w), C.float(h),
+		C.int(angle), &peer.drawError[0], C.size_t(len(peer.drawError)))
 	if result > 0 {
 		return errNativeWaitingFrame
 	}
@@ -208,6 +218,26 @@ func (m *nativeMedia) Draw(mediaID string, renderer unsafe.Pointer, x, y, w, h f
 		return errors.New(C.GoString(&peer.drawError[0]))
 	}
 	return nil
+}
+
+// Dimensions returns the decoded frame's current pixel size, or false while no
+// frame has arrived. It is used only to choose a window shape and rotation.
+func (m *nativeMedia) Dimensions(mediaID string) (int, int, bool) {
+	peer := m.peers[mediaID]
+	if peer == nil {
+		return 0, 0, false
+	}
+	peer.mu.Lock()
+	defer peer.mu.Unlock()
+	if peer.video == nil {
+		return 0, 0, false
+	}
+	var width, height, pitch C.int
+	var rgba [4]C.uint8_t
+	if C.native_video_inspect(peer.video, &width, &height, &pitch, &rgba[0]) == 0 {
+		return 0, 0, false
+	}
+	return int(width), int(height), true
 }
 
 // Only codecs actually decoded below are advertised; the phone's SDP is never rewritten.
