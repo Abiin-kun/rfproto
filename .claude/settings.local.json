@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(file artifacts/shots/*)",
+      "Bash(unzip -l phone-apk/mobiledesktop-base.apk)",
+      "Bash(grep -E \"\\\\.so$\")",
+      "Bash(unzip -l phone-apk/MotoDesktopCore.apk)",
+      "Bash(nm -D phone-apk/apktool-core/lib/arm64-v8a/libCoreNative.so)",
+      "Bash(adb devices *)",
+      "Bash(go version *)",
+      "Bash(go tool *)"
+    ]
+  }
+}

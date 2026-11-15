@@ -1,0 +1,31 @@
+# Build output
+/bin/
+/rfproto
+*.exe
+*.o
+*.a
+*.so
+
+# Runtime state: certificates, private keys, trusted-phone store
+/state/
+
+# Captured protocol traffic contains pairing secrets and personal data
+/capture/
+/raw/
+/qr.png
+
+# Vendor reference extraction (binary artifacts, decompiled APKs/PEs)
+/Lenovo/
+/phone-apk/
+/win/
+/virtio-win.iso
+
+# Screenshots, logs, and agent working files
+/artifacts/
+/logs/
+/.taste-skill/
+*.log
+
+# Editor/OS noise
+.DS_Store
+*.swp
