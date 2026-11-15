@@ -24,7 +24,7 @@
 /artifacts/
 /logs/
 /.taste-skill/
-.claude/
+/.claude/
 docs/
 *.log
 
