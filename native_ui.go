@@ -1171,7 +1171,11 @@ func (l *nativeLauncher) drawEmpty() {
 			}
 		}
 		l.label("Waiting for your phone", 20, nativeWeightSemibold, x, y, colText)
-		l.label("Pair in Ready For, or reopen the app on your phone.", 12, nativeWeightRegular, x, y+32, colFaint)
+		hint := "Pair in Ready For, or reopen the app on your phone."
+		if l.front.hub.mediaInterface != "" {
+			hint = "On your phone, choose Smart Connect in USB preferences."
+		}
+		l.label(hint, 12, nativeWeightRegular, x, y+32, colFaint)
 		return
 	}
 	if len(l.front.state.Apps) == 0 {

@@ -284,11 +284,33 @@ func serve(args []string) {
 	injectAddr := fs.String("inject", "", "loopback address for a live control socket, e.g. 127.0.0.1:19528 (POST /send with a raw frame body, GET /state)")
 	ctlAddr := fs.String("ctl", "", "control API address (default: private state-directory UNIX socket; host:port or unix:/absolute/path; empty disables)")
 	uiEnabled := fs.Bool("ui", true, "open the native SDL phone workspace (false for headless serving)")
+	usbInterface := fs.String("usb-interface", "", "USB Ethernet interface for Smart Connect cable mode")
+	usbPeer := fs.String("usb-peer", "", "phone's IPv4 address on the USB link (required with -usb-interface)")
 	var ipList multiFlag
 	fs.Var(&ipList, "ip", "LAN IP to advertise in QR ips/wifi (repeatable; default: auto-detect all non-loopback)")
 	var sets multiFlag
 	fs.Var(&sets, "set", "override/add TXT entry, e.g. -set type=2 (repeatable)")
 	fs.Parse(args)
+	usbMode := *usbInterface != ""
+	listenHost := ""
+	var cable usbLink
+	if usbMode != (*usbPeer != "") {
+		log.Fatal("-usb-interface and -usb-peer must be used together")
+	}
+	if usbMode {
+		if len(ipList) != 0 || *bleOn || *service != defaultService {
+			log.Fatal("USB cable mode cannot be combined with -ip, -ble, or a custom -service")
+		}
+		var err error
+		cable, err = openUSBLink(*usbInterface, *usbPeer)
+		if err != nil {
+			log.Fatal(err)
+		}
+		listenHost = cable.addr
+		ipList = multiFlag{cable.addr}
+		*service = usbDiscoveryService
+		*noQR = true
+	}
 	resolvedDir, err := resolveStateDir(*dir)
 	if err != nil {
 		log.Fatal(err)
@@ -386,6 +408,7 @@ func serve(args []string) {
 	var assets *frontendObserver
 	if *uiEnabled || *ctlAddr != "" {
 		streams = newViewerHub()
+		streams.mediaInterface = *usbInterface
 		defer streams.close()
 		assets = newFrontendObserver(*dir)
 		frontendAssets = assets
@@ -419,6 +442,9 @@ func serve(args []string) {
 	if inst == "" {
 		inst = *name
 	}
+	if usbMode {
+		inst += "_usb"
+	}
 	txt := []string{
 		"deviceId=" + devID,
 		"deviceName=" + *name,
@@ -430,20 +456,6 @@ func serve(args []string) {
 		fmt.Sprintf("appType=%d", *appType),
 	}
 	txt = applyOverrides(txt, sets)
-
-	zs, err := zeroconf.Register(inst, *service, "local.", *port, txt, nil)
-	if err != nil {
-		log.Fatalf("zeroconf register: %v", err)
-	}
-	defer zs.Shutdown()
-	log.Printf("advertising %q %s.local. port=%d", inst, *service, *port)
-	for _, t := range txt {
-		log.Printf("  txt %s", t)
-	}
-
-	if *probe != *port {
-		go probeListener(*probe)
-	}
 
 	// Our identity, used to build the "auto" pairing reply on connect.
 	//
@@ -464,9 +476,11 @@ func serve(args []string) {
 		DeviceID: devID, Name: *name, FP: fp, Port: *port, Token: replyTokenValue,
 		SN: snValue, SKU: skuValue, SKUKey: *skuKey,
 	}
-	if len(ipList) > 0 {
-		ourInfo.IP = ipList[0]
-	} else if ips := lanIPList(); len(ips) > 0 {
+	ips := []string(ipList)
+	if len(ips) == 0 {
+		ips = lanIPList()
+	}
+	if len(ips) > 0 {
 		ourInfo.IP = ips[0]
 	}
 	// Initialise authentication before accepting any connections.
@@ -479,11 +493,13 @@ func serve(args []string) {
 	if wfdName == "" {
 		wfdName = *name
 	}
-	ips := lanIPList()
-	if len(ipList) > 0 {
-		ips = []string(ipList)
+	var negWsData inviteWsData
+	if usbMode {
+		negWsData = newInviteWsData(devID, *name, fp, tok, nil, "", *port)
+		negWsData.Policies = []map[string][]string{{"usb": ips}}
+	} else {
+		negWsData = newInviteWsData(devID, *name, fp, tok, ips, wfdName, *port)
 	}
-	negWsData := newInviteWsData(devID, *name, fp, tok, ips, wfdName, *port)
 	reconnectEndpoint = negWsData
 
 	if *castDry {
@@ -519,16 +535,22 @@ func serve(args []string) {
 		},
 	}
 
-	ln, err := net.Listen("tcp", fmt.Sprintf(":%d", *port))
+	listenAddr := net.JoinHostPort(listenHost, strconv.Itoa(*port))
+	ln, err := net.Listen("tcp", listenAddr)
 	if err != nil {
 		log.Fatal(err)
 	}
-	log.Printf("listening TLS on :%d (local addrs: %s)", *port, localAddrs())
+	log.Printf("listening TLS on %s", ln.Addr())
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", handle)
+	var handler http.Handler = mux
+	if usbMode {
+		mux.HandleFunc("/readyfor/rdp", usbDiscoveryHandler(negWsData))
+		handler = cable.restrict(mux)
+	}
 	hs := &http.Server{
-		Handler:  mux,
+		Handler:  handler,
 		ErrorLog: log.New(os.Stderr, "[srv] ", log.Ltime|log.Lmicroseconds),
 	}
 	go func() {
@@ -537,16 +559,38 @@ func serve(args []string) {
 		}
 	}()
 
+	var zs *zeroconf.Server
+	if !usbMode {
+		zs, err = zeroconf.Register(inst, *service, "local.", *port, txt, nil)
+	} else {
+		// Avoid sharing an mDNS hostname with the laptop's LAN addresses.
+		usbHost := "rfproto-usb-" + hex.EncodeToString(sum[:6])
+		zs, err = zeroconf.RegisterProxy(inst, *service, "local.", *port, usbHost, ips, txt, []net.Interface{cable.iface})
+	}
+	if err != nil {
+		log.Fatalf("zeroconf register: %v", err)
+	}
+	defer zs.Shutdown()
+	log.Printf("advertising %q %s.local. port=%d", inst, *service, *port)
+	for _, t := range txt {
+		log.Printf("  txt %s", t)
+	}
+	if *probe != *port {
+		go probeListener(net.JoinHostPort(listenHost, strconv.Itoa(*probe)))
+	}
+
 	// Emit the pairing QR. The phone scans it, pins our cert against `fp`
 	// (which we computed from the cert above, so the pin matches), and dials
 	// our wsPort. This is the PC-initiated pairing path.
 	//
 	// The same endpoint data is used inside authenticated LAN/BLE replies.
-	negJSON, err := wsDataJSON(negWsData)
-	if err != nil {
-		log.Printf("[qr] wsData marshal: %v", err)
-	} else {
-		log.Printf("[qr] wsData (%dB, also the negotiation endpoint): %s", len(negJSON), negJSON)
+	if !usbMode {
+		negJSON, err := wsDataJSON(negWsData)
+		if err != nil {
+			log.Printf("[qr] wsData marshal: %v", err)
+		} else {
+			log.Printf("[qr] wsData (%dB, also the negotiation endpoint): %s", len(negJSON), negJSON)
+		}
 	}
 	if !*noQR {
 		payload, err := buildInvite(devID, *name, fp, tok, ips, wfdName, *port)
@@ -1103,13 +1147,13 @@ func deref(p *int64) any {
 	return *p
 }
 
-func probeListener(port int) {
-	ln, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
+func probeListener(addr string) {
+	ln, err := net.Listen("tcp", addr)
 	if err != nil {
-		log.Printf("[probe] listen %d: %v", port, err)
+		log.Printf("[probe] listen %s: %v", addr, err)
 		return
 	}
-	log.Printf("[probe] plain TCP on :%d", port)
+	log.Printf("[probe] plain TCP on %s", ln.Addr())
 	for {
 		c, err := ln.Accept()
 		if err != nil {
@@ -1230,17 +1274,6 @@ func deviceID(dir, override string) string {
 	id := base64.StdEncoding.EncodeToString(raw)
 	os.WriteFile(p, []byte(id), 0o644)
 	return id
-}
-
-func localAddrs() string {
-	var out []string
-	addrs, _ := net.InterfaceAddrs()
-	for _, a := range addrs {
-		if ipn, ok := a.(*net.IPNet); ok && ipn.IP.To4() != nil && !ipn.IP.IsLoopback() {
-			out = append(out, ipn.IP.String())
-		}
-	}
-	return strings.Join(out, ", ")
 }
 
 func loadOrCreateCert(dir string, useRSA bool, host string) (tls.Certificate, error) {

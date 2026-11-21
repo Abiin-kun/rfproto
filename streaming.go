@@ -127,23 +127,24 @@ type audioSession struct {
 }
 
 type viewerHub struct {
-	mu          sync.Mutex
-	control     *liveSession
-	apps        []viewerApp // Published snapshots are immutable.
-	catalog     map[string]catalogApp
-	appLimit    int
-	sessions    map[string]*streamSession
-	order       []*streamSession
-	audio       *audioSession
-	instance    int32
-	inputSeq    uint64
-	nextSession uint64
-	nextMedia   uint64
-	nextAudio   int32
-	events      chan any
-	eventsOpen  bool
-	done        chan struct{}
-	closed      bool
+	mediaInterface string // Optional ICE interface, set before serving.
+	mu             sync.Mutex
+	control        *liveSession
+	apps           []viewerApp // Published snapshots are immutable.
+	catalog        map[string]catalogApp
+	appLimit       int
+	sessions       map[string]*streamSession
+	order          []*streamSession
+	audio          *audioSession
+	instance       int32
+	inputSeq       uint64
+	nextSession    uint64
+	nextMedia      uint64
+	nextAudio      int32
+	events         chan any
+	eventsOpen     bool
+	done           chan struct{}
+	closed         bool
 }
 
 func newViewerHub() *viewerHub {

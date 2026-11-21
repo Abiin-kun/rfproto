@@ -241,7 +241,7 @@ func (m *nativeMedia) Dimensions(mediaID string) (int, int, bool) {
 }
 
 // Only codecs actually decoded below are advertised; the phone's SDP is never rewritten.
-func newNativePeerConnection(kind string) (*webrtc.PeerConnection, error) {
+func newNativePeerConnection(kind, interfaceName string) (*webrtc.PeerConnection, error) {
 	engine := &webrtc.MediaEngine{}
 	if kind == "audio" {
 		if err := engine.RegisterCodec(webrtc.RTPCodecParameters{RTPCodecCapability: webrtc.RTPCodecCapability{
@@ -282,7 +282,11 @@ func newNativePeerConnection(kind string) (*webrtc.PeerConnection, error) {
 	if err := webrtc.RegisterDefaultInterceptors(engine, registry); err != nil {
 		return nil, err
 	}
-	api := webrtc.NewAPI(webrtc.WithMediaEngine(engine), webrtc.WithInterceptorRegistry(registry))
+	var settings webrtc.SettingEngine
+	if interfaceName != "" {
+		settings.SetInterfaceFilter(func(name string) bool { return name == interfaceName })
+	}
+	api := webrtc.NewAPI(webrtc.WithMediaEngine(engine), webrtc.WithInterceptorRegistry(registry), webrtc.WithSettingEngine(settings))
 	return api.NewPeerConnection(webrtc.Configuration{BundlePolicy: webrtc.BundlePolicyMaxBundle, RTCPMuxPolicy: webrtc.RTCPMuxPolicyRequire})
 }
 
@@ -318,7 +322,7 @@ func (p *nativePeer) run(offer rtcDescription) {
 }
 
 func (p *nativePeer) negotiate(offer rtcDescription) error {
-	pc, err := newNativePeerConnection(p.kind)
+	pc, err := newNativePeerConnection(p.kind, p.owner.hub.mediaInterface)
 	if err != nil {
 		return err
 	}
