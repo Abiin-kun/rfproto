@@ -96,28 +96,31 @@ func TestDurablePairing(t *testing.T) {
 	})
 	replyToFirst, pairAckMode, pairAckCmd, captureDir = "auto", "auto", 1, ""
 	ourInfo = replyInfo{DeviceID: "linux-pc", Name: "Linux", SN: "test-serial"}
-	url := pairingServer(t)
-	c := pairDial(t, url)
-	first := pairExchange(t, c, capturedHello)
-	if first.Data.Paired != 0 || first.Data.Device.IsPaired || first.Data.Device.Key != "" {
-		t.Fatal("new phone incorrectly marked trusted before confirmation")
-	}
-	ack := pairExchange(t, c, capturedPairConfirm)
-	key := ack.Data.Device.Key
 	id := "Icca7GgDY7+U16HiYxvNrg=="
-	if ack.Data.Cmd != 1 || !ack.Data.Device.IsPaired || !validPairKey(key) {
-		t.Fatal("pair-confirm did not establish shared credentials")
+	var key string
+	if !t.Run("initial pairing", func(t *testing.T) {
+		c := pairDial(t, pairingServer(t))
+		first := pairExchange(t, c, capturedHello)
+		if first.Data.Paired != 0 || first.Data.Device.IsPaired || first.Data.Device.Key != "" {
+			t.Fatal("new phone incorrectly marked trusted before confirmation")
+		}
+		ack := pairExchange(t, c, capturedPairConfirm)
+		key = ack.Data.Device.Key
+		if ack.Data.Cmd != 1 || !ack.Data.Device.IsPaired || !validPairKey(key) {
+			t.Fatal("pair-confirm did not establish shared credentials")
+		}
+		// Observe disk at acknowledgment, not merely after handler shutdown.
+		disk, err := readPeers(trustedAdults.dir)
+		if err != nil || disk[id].Key != key {
+			t.Fatalf("acknowledged before persistence: %v", err)
+		}
+		info, err := os.Stat(filepath.Join(trustedAdults.dir, "peers.json"))
+		if err != nil || info.Mode().Perm() != 0o600 {
+			t.Fatalf("unsafe trust file permissions: %v", err)
+		}
+	}) {
+		return
 	}
-	// Observe disk at acknowledgment, not merely after handler shutdown.
-	disk, err := readPeers(trustedAdults.dir)
-	if err != nil || disk[id].Key != key {
-		t.Fatalf("acknowledged before persistence: %v", err)
-	}
-	info, err := os.Stat(filepath.Join(trustedAdults.dir, "peers.json"))
-	if err != nil || info.Mode().Perm() != 0o600 {
-		t.Fatalf("unsafe trust file permissions: %v", err)
-	}
-	c.Close()
 
 	// Load a separate store instance as a restarted daemon would.
 	dir := trustedAdults.dir
@@ -131,7 +134,7 @@ func TestDurablePairing(t *testing.T) {
 	trustedAdults = reopened
 	t.Cleanup(func() { reopened.close() })
 	qrToken = "a-different-invite-after-restart"
-	r := pairDial(t, url)
+	r := pairDial(t, pairingServer(t))
 	reply := pairExchange(t, r, reconnectHello(id, key))
 	if reply.Data.Paired != 1 || !reply.Data.Device.IsPaired || reply.Data.Device.Key != key {
 		t.Fatal("reconnect lost persisted trust")
