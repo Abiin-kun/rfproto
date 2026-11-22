@@ -100,6 +100,44 @@ interface, add `-ip YOUR_LAN_IP` (repeatable). Use `-name MYPC` to name the peer
 `rfproto browse 15` discovers other `_readyformdns._tcp` peers;
 `rfproto ble scan -secs 20` inspects BLE advertisements.
 
+### Smart Connect over USB (experimental)
+
+Use a data cable and a phone that offers **Smart Connect** in its USB preferences.
+This mode uses USB Ethernet, not ADB or USB display output.
+
+1. Connect the unlocked phone. If Linux doesn't get a USB Ethernet link, enable
+   **USB tethering** on the phone first and let Linux obtain an IPv4 address by DHCP.
+2. Find the USB network interface and the phone's IPv4 address on it:
+
+   ```sh
+   ip -br -4 address
+   ip -4 route show dev enp0s20u4
+   ```
+
+   Replace `enp0s20u4` with your interface. If the USB link installed a DHCP
+   gateway, that gateway is the phone. Otherwise check `ip neigh show dev
+   enp0s20u4`. Use the phone's USB address, not its Wi-Fi address.
+3. Start rfproto with the interface and phone address, then choose **Smart
+   Connect** under **Use USB for** on the phone and follow its prompts:
+
+   ```sh
+   rfproto serve -usb-interface enp0s20u4 -usb-peer 192.0.2.2
+   ```
+
+   `192.0.2.2` is an example; use the actual phone address. No QR scan, BLE
+   advertisement, or root access is required by rfproto.
+
+Use a direct cable to your own phone. The pairing invitation is sent to the
+configured USB peer; USB address filtering is not proof of identity. The normal
+pair-confirm and saved-key checks still apply. The server listens on the USB
+IPv4 address, scopes mDNS to that interface, and limits local WebRTC candidates
+to it. If a firewall blocks the connection, allow mDNS and the selected
+`-port` (TCP 19527 by default) on the USB link. Media also uses WebRTC UDP ports.
+rfproto does not change the firewall or USB network settings.
+
+Keep the same state directory. If the USB link gets a different address after
+replugging, restart `serve` with the updated interface and phone address.
+
 ### CLI, TUI, and headless pairing
 
 Start the GUI with `rfproto`, then use another terminal:

@@ -104,7 +104,7 @@ func nativeDecodeTest(t *testing.T, name string, wantWidth, wantHeight int) {
 		t.Fatal(err)
 	}
 	defer offerer.Close()
-	answerer, err := newNativePeerConnection(kind)
+	answerer, err := newNativePeerConnection(kind, "")
 	if err != nil {
 		t.Fatal(err)
 	}
