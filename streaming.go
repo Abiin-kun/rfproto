@@ -300,6 +300,22 @@ func (h *viewerHub) sendLocked(service int, payload any) error {
 	return h.control.send("stream", out)
 }
 
+func (h *viewerHub) sendCommand(service, cmd int, data any) error {
+	h.mu.Lock()
+	control := h.control
+	h.mu.Unlock()
+	if control == nil {
+		return errors.New("no authenticated phone is connected")
+	}
+	out, err := json.Marshal(svcMsg{DeviceID: ourInfo.DeviceID, SrcServiceID: service,
+		ServiceID: service, MsgID: nextWireMsgID(), SenderID: senderIDMobileDesktop,
+		Data: streamCommandData{Ver: "1", Cmd: cmd, Data: data}})
+	if err != nil {
+		return err
+	}
+	return control.send("stream", out)
+}
+
 type streamCommandData struct {
 	Ver  string `json:"ver"`
 	Cmd  int    `json:"cmd"`
@@ -1177,6 +1193,7 @@ func (h *viewerHub) maintain() {
 		case <-h.done:
 			return
 		case now := <-ticker.C:
+			var heartbeat bool
 			h.mu.Lock()
 			for _, s := range h.order {
 				if !s.deadline.IsZero() && !now.Before(s.deadline) {
@@ -1193,12 +1210,17 @@ func (h *viewerHub) maintain() {
 				h.failAudioLocked("phone audio did not become ready; check phone permission")
 			}
 			if h.control != nil && h.hasRunningLocked() && now.Sub(lastHeartbeat) >= 20*time.Second {
-				if err := h.sendCommandLocked(svcAppStream, 9, nil); err != nil {
-					h.errorLocked(err)
-				}
+				heartbeat = true
 				lastHeartbeat = now
 			}
 			h.mu.Unlock()
+			if heartbeat {
+				if err := h.sendCommand(svcAppStream, 9, nil); err != nil {
+					h.mu.Lock()
+					h.errorLocked(err)
+					h.mu.Unlock()
+				}
+			}
 		}
 	}
 }

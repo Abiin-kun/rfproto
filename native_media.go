@@ -305,10 +305,11 @@ func (p *nativePeer) isClosed() bool {
 
 func (p *nativePeer) signal(command viewerCommand) error {
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	if p.closed || p.failed {
+		p.mu.Unlock()
 		return io.EOF
 	}
+	p.mu.Unlock()
 	_, err := p.owner.hub.command(command)
 	return err
 }

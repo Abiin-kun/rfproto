@@ -160,7 +160,6 @@ if ((install_desktop)); then
     desktop_exec=${desktop_exec//\`/\\\`}
     desktop_exec=${desktop_exec//\$/\\\$}
     desktop_exec=${desktop_exec//%/%%}
-    desktop_exec=${desktop_exec//\\/\\\\}
     while IFS= read -r line; do
         if [[ $line = Exec=* ]]; then
             printf 'Exec="%s"\n' "$desktop_exec"

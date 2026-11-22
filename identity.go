@@ -60,14 +60,21 @@ func machineGUID(dir string) string {
 	p := filepath.Join(dir, "machine_guid")
 	if b, err := os.ReadFile(p); err == nil {
 		if s := strings.TrimSpace(string(b)); s != "" {
-			return s
+			if g := guidFromHex(s); g != "" {
+				return g
+			}
 		}
 	}
 	raw := make([]byte, 16)
 	if _, err := rand.Read(raw); err != nil {
 		log.Printf("[id] rand: %v", err)
+		return ""
 	}
 	g := fmt.Sprintf("%x-%x-%x-%x-%x", raw[0:4], raw[4:6], raw[6:8], raw[8:10], raw[10:16])
+	if g == "00000000-0000-0000-0000-000000000000" {
+		log.Printf("[id] rand returned an invalid zero identity")
+		return ""
+	}
 	if err := os.WriteFile(p, []byte(g), 0o644); err != nil {
 		log.Printf("[id] write %s: %v", p, err)
 	}
@@ -85,6 +92,9 @@ func guidFromHex(s string) string {
 		if !strings.ContainsRune("0123456789abcdef", c) {
 			return ""
 		}
+	}
+	if strings.Trim(s, "0") == "" {
+		return ""
 	}
 	return fmt.Sprintf("%s-%s-%s-%s-%s", s[0:8], s[8:12], s[12:16], s[16:20], s[20:32])
 }

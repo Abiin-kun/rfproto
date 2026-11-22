@@ -141,6 +141,25 @@ func TestControlHandlersRequireStartedHub(t *testing.T) {
 }
 
 func TestControlLaunchValidation(t *testing.T) {
+	t.Run("rejects commands for another endpoint", func(t *testing.T) {
+		for _, tc := range []struct {
+			name    string
+			handler http.HandlerFunc
+			body    string
+			want    string
+		}{
+			{"launch rejects input", handleLaunch, `{"op":"input","type":"touch","sessionId":"v1"}`, "unsupported op for /launch"},
+			{"stop rejects input", handleStop, `{"op":"input","type":"touch","sessionId":"v1"}`, "unsupported op for /stop"},
+		} {
+			rec := controlCall(t, tc.handler, http.MethodPost, tc.body)
+			if rec.Code != http.StatusBadRequest {
+				t.Errorf("%s: status %d, want %d", tc.name, rec.Code, http.StatusBadRequest)
+			}
+			if got := rec.Body.String(); !strings.Contains(got, tc.want) {
+				t.Errorf("%s: body %q does not contain %q", tc.name, got, tc.want)
+			}
+		}
+	})
 	// The connection checks come first: with an open workspace but no phone,
 	// every launch is refused before its size, mode or op is inspected.
 	t.Run("workspace before validation", func(t *testing.T) {
