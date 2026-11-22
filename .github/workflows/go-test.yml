@@ -20,6 +20,13 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+    env:
+        SDL_VERSION: "3.2.8"
+        SDL_PREFIX: ${{ github.workspace }}/.deps/sdl3
+        PKG_CONFIG_PATH: ${{ github.workspace }}/.deps/sdl3/lib/pkgconfig
+        LD_LIBRARY_PATH: ${{ github.workspace }}/.deps/sdl3/lib
+        SDL_VIDEODRIVER: dummy
+        SDL_AUDIODRIVER: dummy
     steps:
       - uses: actions/checkout@v4
 
@@ -27,7 +34,36 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+      - name: Install system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config cmake ninja-build \
+            libavcodec-dev libavutil-dev libswscale-dev \
+            libopus-dev libfreetype-dev
 
+      - name: Cache SDL3
+        id: sdl3-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.SDL_PREFIX }}
+          key: sdl3-${{ env.SDL_VERSION }}-${{ runner.os }}
+
+      - name: Build SDL3
+        if: steps.sdl3-cache.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get install -y --no-install-recommends \
+            libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev \
+            libxss-dev libwayland-dev libxkbcommon-dev libasound2-dev \
+            libpulse-dev libudev-dev libdrm-dev libgbm-dev libgl1-mesa-dev
+          git clone --depth 1 --branch release-${SDL_VERSION} https://github.com/libsdl-org/SDL.git /tmp/SDL
+          cmake -S /tmp/SDL -B /tmp/SDL/build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="$SDL_PREFIX" \
+            -DCMAKE_INSTALL_LIBDIR=lib \
+            -DSDL_TESTS=OFF -DSDL_EXAMPLES=OFF
+          cmake --build /tmp/SDL/build
+          cmake --install /tmp/SDL/build
       - name: Vet
         run: go vet ./...
 
