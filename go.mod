@@ -11,6 +11,8 @@ require (
 	github.com/pion/rtp v1.8.25
 	github.com/pion/webrtc/v4 v4.1.6
 	github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e
+	golang.org/x/sys v0.30.0
+	golang.org/x/term v0.29.0
 )
 
 require (
@@ -32,6 +34,4 @@ require (
 	github.com/wlynxg/anet v0.0.5 // indirect
 	golang.org/x/crypto v0.33.0 // indirect
 	golang.org/x/net v0.35.0 // indirect
-	golang.org/x/sys v0.30.0 // indirect
-	golang.org/x/term v0.29.0 // indirect
 )
