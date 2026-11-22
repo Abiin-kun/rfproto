@@ -197,12 +197,18 @@ func TestControlLaunchValidation(t *testing.T) {
 			{"unsupported size", `{"op":"launch","mode":"desktop","width":800,"height":600}`, "choose a supported display size"},
 			{"unknown mode", `{"op":"launch","mode":"handheld","width":1280,"height":720}`, "unknown streaming mode"},
 			{"missing app", `{"op":"launch","mode":"app","appId":"gone/nowhere:0:","width":1280,"height":720}`, "app is no longer in the phone's catalog"},
-			{"unknown op", `{"op":"hibernate","width":1280,"height":720}`, "unknown workspace command"},
+			{"unknown op", `{"op":"hibernate","width":1280,"height":720}`, "unsupported op for /launch"},
 		}
 		for _, tc := range cases {
 			rec := controlCall(t, handleLaunch, http.MethodPost, tc.body)
 			if rec.Code != http.StatusBadRequest {
 				t.Errorf("%s: status %d, want %d (%s)", tc.name, rec.Code, http.StatusBadRequest, rec.Body.String())
+			}
+			if tc.wantErr == "unsupported op for /launch" {
+				if got := strings.TrimSpace(rec.Body.String()); got != tc.wantErr {
+					t.Errorf("%s: error %q, want %q", tc.name, got, tc.wantErr)
+				}
+				continue
 			}
 			body := controlJSON(t, rec)
 			if body["error"] != tc.wantErr {
