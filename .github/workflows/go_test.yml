@@ -1,14 +1,8 @@
-# .github/workflows/go-test.yml
 name: Go Test
 
 on:
   pull_request:
-    branches: [main]
-    paths:
-      - "**.go"
-      - "go.mod"
-      - "go.sum"
-      - ".github/workflows/go-test.yml"
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -21,12 +15,12 @@ jobs:
   test:
     runs-on: ubuntu-latest
     env:
-        SDL_VERSION: "3.2.8"
-        SDL_PREFIX: ${{ github.workspace }}/.deps/sdl3
-        PKG_CONFIG_PATH: ${{ github.workspace }}/.deps/sdl3/lib/pkgconfig
-        LD_LIBRARY_PATH: ${{ github.workspace }}/.deps/sdl3/lib
-        SDL_VIDEODRIVER: dummy
-        SDL_AUDIODRIVER: dummy
+      SDL_VERSION: "3.2.8"
+      SDL_PREFIX: ${{ github.workspace }}/.deps/sdl3
+      PKG_CONFIG_PATH: ${{ github.workspace }}/.deps/sdl3/lib/pkgconfig
+      LD_LIBRARY_PATH: ${{ github.workspace }}/.deps/sdl3/lib
+      SDL_VIDEODRIVER: dummy
+      SDL_AUDIODRIVER: dummy
     steps:
       - uses: actions/checkout@v4
 
@@ -34,6 +28,7 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+
       - name: Install system deps
         run: |
           sudo apt-get update
@@ -64,6 +59,7 @@ jobs:
             -DSDL_TESTS=OFF -DSDL_EXAMPLES=OFF
           cmake --build /tmp/SDL/build
           cmake --install /tmp/SDL/build
+
       - name: Vet
         run: go vet ./...
 
