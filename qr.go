@@ -115,7 +115,9 @@ func wsDataJSON(ws inviteWsData) ([]byte, error) {
 // observed length of the real PC token.
 func newToken() string {
 	raw := make([]byte, 32)
-	rand.Read(raw)
+	if _, err := rand.Read(raw); err != nil {
+		return ""
+	}
 	return base64.StdEncoding.EncodeToString(raw)
 }
 
@@ -139,10 +141,14 @@ func renderQR(payload, pngPath string) {
 		if err := qrcode.WriteFile(payload, qrcode.Medium, 512, pngPath); err != nil {
 			log.Printf("[qr] write %s: %v", pngPath, err)
 		} else {
-			log.Printf("[qr] wrote %s (512x512 PNG)", pngPath)
+			if err := os.Chmod(pngPath, 0o600); err != nil {
+				log.Printf("[qr] secure %s: %v", pngPath, err)
+				_ = os.Remove(pngPath)
+			} else {
+				log.Printf("[qr] wrote %s (512x512 PNG, mode 0600)", pngPath)
+			}
 		}
 	}
-	log.Printf("[qr] payload (%d bytes): %s", len(payload), payload)
 	printASCIIQR(payload)
 }
 

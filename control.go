@@ -306,6 +306,10 @@ func handleLaunch(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	if cmd.Op != "" && cmd.Op != "launch" {
+		http.Error(w, "unsupported op for /launch", http.StatusBadRequest)
+		return
+	}
 	if cmd.Op == "" {
 		cmd.Op = "launch"
 	}
@@ -336,6 +340,10 @@ func handleStop(w http.ResponseWriter, r *http.Request) {
 	var cmd viewerCommand
 	if err := json.Unmarshal(body, &cmd); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if cmd.Op != "" && cmd.Op != "stop" {
+		http.Error(w, "unsupported op for /stop", http.StatusBadRequest)
 		return
 	}
 	if cmd.Op == "" {

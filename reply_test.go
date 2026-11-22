@@ -195,6 +195,9 @@ func TestIdentityDefaults(t *testing.T) {
 	if g := guidFromHex("4f2a1c8e9b3d4a6f8e210c5d7b9a1e33"); g != "4f2a1c8e-9b3d-4a6f-8e21-0c5d7b9a1e33" {
 		t.Fatalf("guidFromHex = %q", g)
 	}
+	if g := guidFromHex("00000000000000000000000000000000"); g != "" {
+		t.Fatalf("guidFromHex(zero) = %q, want empty", g)
+	}
 	if g := guidFromHex("not-hex"); g != "" {
 		t.Fatalf("guidFromHex(bad) = %q, want empty", g)
 	}

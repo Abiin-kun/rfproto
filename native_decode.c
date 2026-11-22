@@ -263,8 +263,13 @@ int native_audio_push(native_audio *a, const uint8_t *data, int size, int muted,
     if (!a->stream) {
         SDL_AudioSpec spec = {.format = SDL_AUDIO_S16, .channels = 2, .freq = 48000};
         a->stream = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, NULL, NULL);
-        if (!a->stream || !SDL_ResumeAudioStreamDevice(a->stream))
+        if (!a->stream)
             return fail(error, error_size, SDL_GetError());
+        if (!SDL_ResumeAudioStreamDevice(a->stream)) {
+            SDL_DestroyAudioStream(a->stream);
+            a->stream = NULL;
+            return fail(error, error_size, SDL_GetError());
+        }
     }
     int queued = SDL_GetAudioStreamQueued(a->stream);
     if (queued < 0) return fail(error, error_size, SDL_GetError());

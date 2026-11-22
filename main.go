@@ -467,6 +467,9 @@ func serve(args []string) {
 	snValue, skuValue := *sn, *sku
 	if snValue == "" {
 		snValue = machineGUID(*dir)
+		if snValue == "" {
+			log.Fatal("[id] unable to generate a secure machine identity")
+		}
 	}
 	if skuValue == "" {
 		skuValue = machineProductName()
@@ -487,6 +490,9 @@ func serve(args []string) {
 	qrToken = *token
 	if qrToken == "" {
 		qrToken = newToken()
+		if qrToken == "" {
+			log.Fatal("[qr] secure random token generation failed")
+		}
 	}
 	tok := qrToken
 	wfdName := *wfd
@@ -589,7 +595,7 @@ func serve(args []string) {
 		if err != nil {
 			log.Printf("[qr] wsData marshal: %v", err)
 		} else {
-			log.Printf("[qr] wsData (%dB, also the negotiation endpoint): %s", len(negJSON), negJSON)
+			log.Printf("[qr] wsData (%dB, also the negotiation endpoint)", len(negJSON))
 		}
 	}
 	if !*noQR {
@@ -597,7 +603,6 @@ func serve(args []string) {
 		if err != nil {
 			log.Printf("[qr] build: %v", err)
 		} else {
-			log.Printf("[qr] token=%s", tok)
 			renderQR(payload, *qrPath)
 			if assets != nil {
 				assets.setPairingQR(payload)
@@ -823,7 +828,7 @@ func handle(w http.ResponseWriter, r *http.Request) {
 	// Make this session reachable through -inject so probes can be posted into
 	// the already-open connection (no re-pair, no state reset).
 	ls := &liveSession{seq: sess, peer: r.RemoteAddr, send: sendFrame}
-	registered := false
+	setLive(ls)
 	defer clearLive(ls)
 	for {
 		mt, msg, err := c.ReadMessage()
@@ -971,13 +976,6 @@ func handle(w http.ResponseWriter, r *http.Request) {
 					}()
 				}
 			}
-		}
-		if !registered {
-			if phone, ok := trustedAdults.lookup(auth.realID); ok {
-				ls.name = phone.Name
-			}
-			setLive(ls)
-			registered = true
 		}
 		observeFrontendFrame(serviceID, msg)
 		if streams != nil {

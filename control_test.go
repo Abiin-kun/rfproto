@@ -141,6 +141,25 @@ func TestControlHandlersRequireStartedHub(t *testing.T) {
 }
 
 func TestControlLaunchValidation(t *testing.T) {
+	t.Run("rejects commands for another endpoint", func(t *testing.T) {
+		for _, tc := range []struct {
+			name    string
+			handler http.HandlerFunc
+			body    string
+			want    string
+		}{
+			{"launch rejects input", handleLaunch, `{"op":"input","type":"touch","sessionId":"v1"}`, "unsupported op for /launch"},
+			{"stop rejects input", handleStop, `{"op":"input","type":"touch","sessionId":"v1"}`, "unsupported op for /stop"},
+		} {
+			rec := controlCall(t, tc.handler, http.MethodPost, tc.body)
+			if rec.Code != http.StatusBadRequest {
+				t.Errorf("%s: status %d, want %d", tc.name, rec.Code, http.StatusBadRequest)
+			}
+			if got := rec.Body.String(); !strings.Contains(got, tc.want) {
+				t.Errorf("%s: body %q does not contain %q", tc.name, got, tc.want)
+			}
+		}
+	})
 	// The connection checks come first: with an open workspace but no phone,
 	// every launch is refused before its size, mode or op is inspected.
 	t.Run("workspace before validation", func(t *testing.T) {
@@ -178,12 +197,18 @@ func TestControlLaunchValidation(t *testing.T) {
 			{"unsupported size", `{"op":"launch","mode":"desktop","width":800,"height":600}`, "choose a supported display size"},
 			{"unknown mode", `{"op":"launch","mode":"handheld","width":1280,"height":720}`, "unknown streaming mode"},
 			{"missing app", `{"op":"launch","mode":"app","appId":"gone/nowhere:0:","width":1280,"height":720}`, "app is no longer in the phone's catalog"},
-			{"unknown op", `{"op":"hibernate","width":1280,"height":720}`, "unknown workspace command"},
+			{"unknown op", `{"op":"hibernate","width":1280,"height":720}`, "unsupported op for /launch"},
 		}
 		for _, tc := range cases {
 			rec := controlCall(t, handleLaunch, http.MethodPost, tc.body)
 			if rec.Code != http.StatusBadRequest {
 				t.Errorf("%s: status %d, want %d (%s)", tc.name, rec.Code, http.StatusBadRequest, rec.Body.String())
+			}
+			if tc.wantErr == "unsupported op for /launch" {
+				if got := strings.TrimSpace(rec.Body.String()); got != tc.wantErr {
+					t.Errorf("%s: error %q, want %q", tc.name, got, tc.wantErr)
+				}
+				continue
 			}
 			body := controlJSON(t, rec)
 			if body["error"] != tc.wantErr {
