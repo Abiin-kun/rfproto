@@ -19,6 +19,8 @@ struct native_window {
 struct native_ui {
     FT_Library ft;
     FT_Face face;
+    int face_weight;
+    int face_pixels;
     void *font;
     native_window *windows;
     SDL_Cursor *cursor_arrow;
@@ -50,14 +52,20 @@ static uint32_t next_char(const unsigned char **p) {
 
 static int set_face(native_ui *ui, int size, int weight, float density) {
     if (!ui || !ui->face || size <= 0) return -1;
-    FT_Fixed axis = (FT_Fixed)weight << 16;
-    if (weight >= 100 && weight <= 900) {
+    if (weight >= 100 && weight <= 900 && weight != ui->face_weight) {
         /* Inter is a variable font: set the weight design axis when present. */
+        FT_Fixed axis = (FT_Fixed)weight << 16;
         FT_Set_Var_Design_Coordinates(ui->face, 1, &axis);
+        ui->face_weight = weight;
     }
     int pixels = (int)ceilf((float)size * (density > 0 ? density : 1));
     if (pixels < 1) pixels = 1;
-    return FT_Set_Pixel_Sizes(ui->face, 0, (FT_UInt)pixels);
+    if (pixels != ui->face_pixels) {
+        int err = FT_Set_Pixel_Sizes(ui->face, 0, (FT_UInt)pixels);
+        if (err) return err;
+        ui->face_pixels = pixels;
+    }
+    return 0;
 }
 
 static void draw_color(SDL_Renderer *r, unsigned c, unsigned alpha) {
@@ -77,6 +85,8 @@ native_ui *nui_open(const void *font, size_t length) {
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO)) return NULL;
     native_ui *ui = calloc(1, sizeof(*ui));
     if (!ui) { SDL_SetError("Cannot allocate native UI"); SDL_Quit(); return NULL; }
+    ui->face_weight = -1;
+    ui->face_pixels = -1;
     if (FT_Init_FreeType(&ui->ft)) { SDL_SetError("Cannot initialize FreeType"); goto fail; }
     ui->font = malloc(length);
     if (!ui->font) { SDL_SetError("Cannot allocate embedded font"); goto fail; }
@@ -389,30 +399,36 @@ static int rounded_geometry(native_window *win, float x, float y, float w, float
         if (ta > da) { sw = da / ta; sx = (1 - sw) / 2; }
         else if (ta < da) { sh = ta / da; sy = (1 - sh) / 2; }
     }
+    static const float arc_cos[9] = {
+        1.00000000f, 0.98078528f, 0.92387953f, 0.83146961f,
+        0.70710678f, 0.55557023f, 0.38268343f, 0.19509032f, 0.00000000f
+    };
+    static const float arc_sin[9] = {
+        0.00000000f, 0.19509032f, 0.38268343f, 0.55557023f,
+        0.70710678f, 0.83146961f, 0.92387953f, 0.98078528f, 1.00000000f
+    };
+    const float cr = ((color >> 16) & 255) * (1.0f / 255.0f);
+    const float cg = ((color >> 8) & 255) * (1.0f / 255.0f);
+    const float cb = (color & 255) * (1.0f / 255.0f);
+    const float ca = (alpha & 255) * (1.0f / 255.0f);
+    const float inv_w = sw / w;
+    const float inv_h = sh / h;
     int n = 0;
     #define ADD(px, py) do { \
-        v[n].position.x = (px); v[n].position.y = (py); \
-        v[n].color.r = ((color >> 16) & 255) / 255.0f; \
-        v[n].color.g = ((color >> 8) & 255) / 255.0f; \
-        v[n].color.b = (color & 255) / 255.0f; \
-        v[n].color.a = (alpha & 255) / 255.0f; \
-        v[n].tex_coord.x = sx + (((px) - x) / w) * sw; \
-        v[n].tex_coord.y = sy + (((py) - y) / h) * sh; \
+        float _px = (px), _py = (py); \
+        v[n].position.x = _px; v[n].position.y = _py; \
+        v[n].color.r = cr; v[n].color.g = cg; v[n].color.b = cb; v[n].color.a = ca; \
+        v[n].tex_coord.x = sx + (_px - x) * inv_w; \
+        v[n].tex_coord.y = sy + (_py - y) * inv_h; \
         n++; \
     } while (0)
     if (radius > 0.5f) {
-        const float PI = 3.14159265358979323846f;
-        float centers[4][2] = {
-            {x + r, y + r}, {x + w - r, y + r},
-            {x + w - r, y + h - r}, {x + r, y + h - r}
-        };
-        float starts[4] = {PI, 1.5f * PI, 0, 0.5f * PI};
-        for (int c = 0; c < 4; c++) {
-            for (int i = 0; i <= seg; i++) {
-                float a = starts[c] + (float)i / (float)seg * (PI / 2);
-                ADD(centers[c][0] + cosf(a) * r, centers[c][1] + sinf(a) * r);
-            }
-        }
+        float lx = x + r, rx = x + w - r;
+        float ty = y + r, by = y + h - r;
+        for (int i = 0; i <= seg; i++) ADD(lx - arc_cos[i] * r, ty - arc_sin[i] * r);
+        for (int i = 0; i <= seg; i++) ADD(rx + arc_sin[i] * r, ty - arc_cos[i] * r);
+        for (int i = 0; i <= seg; i++) ADD(rx + arc_cos[i] * r, by + arc_sin[i] * r);
+        for (int i = 0; i <= seg; i++) ADD(lx - arc_sin[i] * r, by + arc_cos[i] * r);
     } else {
         ADD(x, y); ADD(x + w, y); ADD(x + w, y + h); ADD(x, y + h);
     }
@@ -421,10 +437,10 @@ static int rounded_geometry(native_window *win, float x, float y, float w, float
     if (radius > 0.5f) {
         v[n].position.x = cx;
         v[n].position.y = cy;
-        v[n].color.r = ((color >> 16) & 255) / 255.0f;
-        v[n].color.g = ((color >> 8) & 255) / 255.0f;
-        v[n].color.b = (color & 255) / 255.0f;
-        v[n].color.a = (alpha & 255) / 255.0f;
+        v[n].color.r = cr;
+        v[n].color.g = cg;
+        v[n].color.b = cb;
+        v[n].color.a = ca;
         v[n].tex_coord.x = sx + 0.5f * sw;
         v[n].tex_coord.y = sy + 0.5f * sh;
         int center = n++;
@@ -494,14 +510,20 @@ native_text *nui_text_new(native_window *win, const char *text, int size, int we
         if (!FT_Load_Glyph(ui->face, glyph, FT_LOAD_RENDER)) {
             FT_GlyphSlot g = ui->face->glyph;
             FT_Bitmap *b = &g->bitmap;
+            int abs_pitch = b->pitch >= 0 ? b->pitch : -b->pitch;
+            int base_dx = pen + g->bitmap_left;
+            int base_dy = 2 + baseline - g->bitmap_top;
+            int is_mono = b->pixel_mode == FT_PIXEL_MODE_MONO;
             for (unsigned y = 0; y < b->rows; y++) {
+                int dy = base_dy + (int)y;
+                if (dy < 0 || dy >= s->h) continue;
+                const unsigned char *row = b->buffer + (b->pitch >= 0 ? y : b->rows - 1 - y) * (unsigned)abs_pitch;
+                unsigned char *dst_row = (unsigned char *)s->pixels + dy * s->pitch;
                 for (unsigned x = 0; x < b->width; x++) {
-                    int dx = pen + g->bitmap_left + (int)x;
-                    int dy = 2 + baseline - g->bitmap_top + (int)y;
-                    if (dx < 0 || dy < 0 || dx >= s->w || dy >= s->h) continue;
-                    const unsigned char *row = b->buffer + (b->pitch >= 0 ? y : b->rows - 1 - y) * abs(b->pitch);
-                    unsigned char alpha = b->pixel_mode == FT_PIXEL_MODE_MONO ? ((row[x / 8] >> (7 - x % 8)) & 1) * 255 : row[x];
-                    unsigned char *d = (unsigned char *)s->pixels + dy * s->pitch + dx * 4;
+                    int dx = base_dx + (int)x;
+                    if (dx < 0 || dx >= s->w) continue;
+                    unsigned char alpha = is_mono ? (unsigned char)(((row[x >> 3] >> (7 - (x & 7))) & 1) * 255) : row[x];
+                    unsigned char *d = dst_row + dx * 4;
                     d[0] = d[1] = d[2] = 255;
                     if (alpha > d[3]) d[3] = alpha;
                 }
