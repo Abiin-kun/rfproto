@@ -13,14 +13,17 @@
 struct native_video {
     AVCodecContext *codec;
     AVFrame *frame;
+    AVFrame *latest;
     AVPacket *packet;
     struct SwsContext *scale;
     int packet_capacity;
     uint8_t *pixels;
     int width, height, pitch;
-    uint64_t serial, uploaded;
+    int rgba_width, rgba_height;
+    uint64_t serial, uploaded, rgba_serial;
     SDL_Texture *texture;
     SDL_Renderer *renderer;
+    SDL_PixelFormat texture_format;
     int texture_width, texture_height;
 };
 
@@ -33,15 +36,64 @@ struct native_audio {
 };
 
 static int fail(char *error, size_t size, const char *message) {
-    snprintf(error, size, "%s", message);
+    if (error && size > 0) snprintf(error, size, "%s", message);
     return -1;
 }
 
 static int av_fail(char *error, size_t size, const char *operation, int code) {
     char detail[AV_ERROR_MAX_STRING_SIZE];
     av_strerror(code, detail, sizeof(detail));
-    snprintf(error, size, "%s: %s", operation, detail);
+    if (error && size > 0) snprintf(error, size, "%s: %s", operation, detail);
     return -1;
+}
+
+static int ensure_rgba(native_video *v, char *error, size_t error_size) {
+    if (!v->serial || !v->latest->data[0]) return 0;
+    if (v->rgba_serial == v->serial && v->pixels) return 0;
+    int w = v->width, h = v->height;
+    if (!v->pixels || w != v->rgba_width || h != v->rgba_height) {
+        /* swscale's SSSE3 RGBA path writes complete 16-pixel blocks.
+           Keep a padded row stride, including on the final output row. */
+        uint8_t *planes[4];
+        int pitches[4];
+        int allocation = av_image_alloc(planes, pitches, w, h, AV_PIX_FMT_RGBA, 64);
+        if (allocation < 0) {
+            return av_fail(error, error_size, "allocating decoded frame", allocation);
+        }
+        av_free(v->pixels);
+        v->pixels = planes[0];
+        v->rgba_width = w;
+        v->rgba_height = h;
+        v->pitch = pitches[0];
+    }
+    v->scale = sws_getCachedContext(v->scale, w, h, v->latest->format,
+                                   w, h, AV_PIX_FMT_RGBA, SWS_BILINEAR,
+                                   NULL, NULL, NULL);
+    if (!v->scale) {
+        return fail(error, error_size, "creating video color conversion");
+    }
+    uint8_t *planes[4] = {v->pixels, NULL, NULL, NULL};
+    int pitches[4] = {v->pitch, 0, 0, 0};
+    int result = sws_scale(v->scale, (const uint8_t *const *)v->latest->data,
+                           v->latest->linesize, 0, h, planes, pitches);
+    if (result != h) return fail(error, error_size, "converting decoded frame");
+    v->rgba_serial = v->serial;
+    return 0;
+}
+
+static SDL_PixelFormat direct_yuv_format(const AVFrame *f) {
+    if (!f) return SDL_PIXELFORMAT_UNKNOWN;
+    if ((f->format == AV_PIX_FMT_YUV420P || f->format == AV_PIX_FMT_YUVJ420P) &&
+        f->data[0] && f->data[1] && f->data[2] &&
+        f->linesize[0] > 0 && f->linesize[1] > 0 && f->linesize[2] > 0) {
+        return SDL_PIXELFORMAT_IYUV;
+    }
+    if (f->format == AV_PIX_FMT_NV12 &&
+        f->data[0] && f->data[1] &&
+        f->linesize[0] > 0 && f->linesize[1] > 0) {
+        return SDL_PIXELFORMAT_NV12;
+    }
+    return SDL_PIXELFORMAT_UNKNOWN;
 }
 
 native_video *native_video_new(int codec, char *error, size_t error_size) {
@@ -61,8 +113,9 @@ native_video *native_video_new(int codec, char *error, size_t error_size) {
     if (!v) { fail(error, error_size, "allocating video decoder"); return NULL; }
     v->codec = avcodec_alloc_context3(implementation);
     v->frame = av_frame_alloc();
+    v->latest = av_frame_alloc();
     v->packet = av_packet_alloc();
-    if (!v->codec || !v->frame || !v->packet) {
+    if (!v->codec || !v->frame || !v->latest || !v->packet) {
         fail(error, error_size, "allocating FFmpeg decoder buffers");
         native_video_free(v);
         return NULL;
@@ -92,35 +145,10 @@ static int receive_frames(native_video *v, char *error, size_t error_size) {
             av_frame_unref(v->frame);
             return fail(error, error_size, "unsupported decoded frame dimensions");
         }
-        if (w != v->width || h != v->height) {
-            /* swscale's SSSE3 RGBA path writes complete 16-pixel blocks.
-               Keep a padded row stride, including on the final output row. */
-            uint8_t *planes[4];
-            int pitches[4];
-            int allocation = av_image_alloc(planes, pitches, w, h, AV_PIX_FMT_RGBA, 64);
-            if (allocation < 0) {
-                av_frame_unref(v->frame);
-                return av_fail(error, error_size, "allocating decoded frame", allocation);
-            }
-            av_free(v->pixels);
-            v->pixels = planes[0];
-            v->width = w;
-            v->height = h;
-            v->pitch = pitches[0];
-        }
-        v->scale = sws_getCachedContext(v->scale, w, h, v->frame->format,
-                                       w, h, AV_PIX_FMT_RGBA, SWS_BILINEAR,
-                                       NULL, NULL, NULL);
-        if (!v->scale) {
-            av_frame_unref(v->frame);
-            return fail(error, error_size, "creating video color conversion");
-        }
-        uint8_t *planes[4] = {v->pixels, NULL, NULL, NULL};
-        int pitches[4] = {v->pitch, 0, 0, 0};
-        result = sws_scale(v->scale, (const uint8_t *const *)v->frame->data,
-                          v->frame->linesize, 0, h, planes, pitches);
-        av_frame_unref(v->frame);
-        if (result != h) return fail(error, error_size, "converting decoded frame");
+        av_frame_unref(v->latest);
+        av_frame_move_ref(v->latest, v->frame);
+        v->width = w;
+        v->height = h;
         v->serial++;
     }
 }
@@ -158,12 +186,21 @@ int native_video_push(native_video *v, const uint8_t *data, int size, char *erro
 static int upload_video(native_video *v, SDL_Renderer *renderer, char *error, size_t error_size) {
     if (!v->serial) return 1; /* Waiting is not a decoder/SDL failure. */
     if (!renderer) return fail(error, error_size, "invalid video destination");
-    if (!v->texture || v->renderer != renderer || v->texture_width != v->width || v->texture_height != v->height) {
+    SDL_PixelFormat yuv_fmt = direct_yuv_format(v->latest);
+    SDL_PixelFormat target_fmt = yuv_fmt != SDL_PIXELFORMAT_UNKNOWN ? yuv_fmt : SDL_PIXELFORMAT_RGBA32;
+    if (!v->texture || v->renderer != renderer || v->texture_width != v->width ||
+        v->texture_height != v->height || v->texture_format != target_fmt) {
         SDL_DestroyTexture(v->texture);
-        v->texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGBA32, SDL_TEXTUREACCESS_STREAMING,
+        v->texture = SDL_CreateTexture(renderer, target_fmt, SDL_TEXTUREACCESS_STREAMING,
                                        v->width, v->height);
+        if (!v->texture && yuv_fmt != SDL_PIXELFORMAT_UNKNOWN) {
+            target_fmt = SDL_PIXELFORMAT_RGBA32;
+            v->texture = SDL_CreateTexture(renderer, target_fmt, SDL_TEXTUREACCESS_STREAMING,
+                                           v->width, v->height);
+        }
         if (!v->texture) return fail(error, error_size, SDL_GetError());
         v->renderer = renderer;
+        v->texture_format = target_fmt;
         v->texture_width = v->width;
         v->texture_height = v->height;
         v->uploaded = 0;
@@ -171,8 +208,22 @@ static int upload_video(native_video *v, SDL_Renderer *renderer, char *error, si
             return fail(error, error_size, SDL_GetError());
     }
     if (v->uploaded != v->serial) {
-        if (!SDL_UpdateTexture(v->texture, NULL, v->pixels, v->pitch))
-            return fail(error, error_size, SDL_GetError());
+        if (v->texture_format == SDL_PIXELFORMAT_IYUV) {
+            if (!SDL_UpdateYUVTexture(v->texture, NULL,
+                                      v->latest->data[0], v->latest->linesize[0],
+                                      v->latest->data[1], v->latest->linesize[1],
+                                      v->latest->data[2], v->latest->linesize[2]))
+                return fail(error, error_size, SDL_GetError());
+        } else if (v->texture_format == SDL_PIXELFORMAT_NV12) {
+            if (!SDL_UpdateNVTexture(v->texture, NULL,
+                                     v->latest->data[0], v->latest->linesize[0],
+                                     v->latest->data[1], v->latest->linesize[1]))
+                return fail(error, error_size, SDL_GetError());
+        } else {
+            if (ensure_rgba(v, error, error_size) < 0) return -1;
+            if (!SDL_UpdateTexture(v->texture, NULL, v->pixels, v->pitch))
+                return fail(error, error_size, SDL_GetError());
+        }
         v->uploaded = v->serial;
     }
     return 0;
@@ -217,10 +268,16 @@ int native_video_draw_rotated(native_video *v, void *renderer, float x, float y,
 }
 
 uint64_t native_video_inspect(native_video *v, int *width, int *height, int *pitch, uint8_t *rgba) {
+    if (v->serial && ensure_rgba(v, NULL, 0) < 0) {
+        *width = v->width;
+        *height = v->height;
+        *pitch = 0;
+        return 0;
+    }
     *width = v->width;
     *height = v->height;
     *pitch = v->pitch;
-    if (v->serial) memcpy(rgba, v->pixels, 4);
+    if (v->serial && v->pixels) memcpy(rgba, v->pixels, 4);
     return v->serial;
 }
 
@@ -230,6 +287,7 @@ void native_video_free(native_video *v) {
     sws_freeContext(v->scale);
     av_free(v->pixels);
     av_packet_free(&v->packet);
+    av_frame_free(&v->latest);
     av_frame_free(&v->frame);
     avcodec_free_context(&v->codec);
     free(v);
